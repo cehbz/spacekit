@@ -400,9 +400,10 @@ func buildLayout(s *snapshot) layout.Layout {
 
 func saveCmd(explicit string, keep int) error {
 	if !skylight.ScreenRecordingGranted() {
-		fmt.Fprintln(os.Stderr, "note: Screen Recording not granted — window titles are limited to the active space, weakening cross-space matching.")
-		fmt.Fprintln(os.Stderr, "      Triggering the permission request; approve spacekeeper under Privacy & Security > Screen Recording, then run save again.")
-		skylight.RequestScreenRecording()
+		skylight.RequestScreenRecording() // register the binary; silent, not narrated
+		fmt.Fprintln(os.Stderr, `note: Screen Recording is unavailable to this process; `+
+			`window titles are limited to the active space, weakening cross-space matching. `+
+			`See the README "Screen Recording" section.`)
 	}
 	s, err := gather()
 	if err != nil {

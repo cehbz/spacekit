@@ -116,13 +116,24 @@ Restore at login is available as an opt-in agent (`make restore-agent-install` /
 
 The read side is SkyLight introspection (`SLSCopyManagedDisplaySpaces`, `SLSCopySpacesForWindows`), callable from any process. The write side is `SLSBridgedMoveWindowsToManagedSpaceOperation`, the bridged operation that works with SIP enabled since macOS 26.4. It is private and may vanish in any update; spacekeeper resolves it at runtime and reports clearly when it is unavailable. Verified working on macOS 26.5.
 
-Spaces are identified by UUID, with a (display, position) fallback when a UUID is gone. Window IDs do not survive reboots, so windows are re-matched by app, then title, then frame proximity. Titles come from `kCGWindowName` (needs Screen Recording, covers all spaces) with an Accessibility fallback that covers the active space only; `save` triggers the Screen Recording request, since hand-adding a CLI to that list often does not bind. Without any titles, matching uses app and frame.
+Spaces are identified by UUID, with a (display, position) fallback when a UUID is gone. Window IDs do not survive reboots, so windows are re-matched by app, then title, then frame proximity. Titles come from `kCGWindowName` (needs Screen Recording, covers all spaces) with an Accessibility fallback that covers the active space only; without any titles, matching uses app and frame. See [Screen Recording](#screen-recording) for the permission's quirks.
 
 If a display has fewer desktops than the saved layout (e.g. after a display was disconnected and reconnected), restore recreates the missing ones before moving windows. This is the one operation that drives Mission Control — it animates in and out, unavoidably, because there is no non-flashy, no-SIP way to create a Dock-managed space. It runs only when desktops are actually missing; disable with `-create=false`. Recreated desktops get new UUIDs, so windows resolve to them by display position.
 
 Fullscreen windows are recorded at save time and, with `-fullscreen`, restored by toggling each window's `AXFullScreen` (which recreates its dedicated space). Caveats: it works only for apps that expose a settable `AXFullScreen` (most do); macOS places the recreated fullscreen space by creation order, not at a precise slot; and the window is fullscreened on whatever display it is currently on. Run after windows have reopened. Without `-fullscreen`, such windows are matched but left alone and reported.
 
 Limitations, by design: all-spaces (sticky) windows and Split View pairs are not reconstructed (a Split View window becomes a solo fullscreen at best), and recreating a desktop on a display that is entirely gone is not possible (those windows are reported instead).
+
+### Screen Recording
+
+Cross-space window titles come from `kCGWindowName`, which needs Screen Recording permission. Without it, titles are limited to an Accessibility fallback that covers only the active space, and matching falls back to app plus frame — weaker, and more likely to put a window back on the wrong space when an app has several similar windows.
+
+`save` prints a one-line note when the Screen Recording check returns false. Whether that matters depends on how `save` runs, because macOS attributes the check to the **responsible process**, not necessarily to the binary:
+
+- **Under the launchd agents** (`save`/`restore`), spacekeeper is its own responsible process and TCC subject, so grant Screen Recording to spacekeeper itself. This is the path that matters for restore quality, and it works.
+- **Run by hand from a terminal**, the responsible process is the terminal or shell, not spacekeeper — so the note can appear even when spacekeeper is granted. Either grant Screen Recording to the terminal app, or ignore the note and rely on the agent.
+
+Grant under System Settings → Privacy & Security → Screen & System Audio Recording. As with Accessibility, changing the signing certificate orphans the grant — remove the stale row and re-grant.
 
 ## Research
 
