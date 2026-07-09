@@ -13,13 +13,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/cehbz/spacekit/internal/appwatch"
 	"github.com/cehbz/spacekit/internal/layout"
 	"github.com/cehbz/spacekit/internal/skylight"
 )
+
+// The AppKit run loop used by -converge must own the main OS thread.
+func init() { runtime.LockOSThread() }
 
 func usage() {
 	fmt.Fprint(os.Stderr, `usage: spacekeeper <command> [flags]
@@ -43,6 +48,7 @@ flags (after the command):
   -frames   restore: also restore each window's position and size (needs Accessibility)
   -create   restore: recreate missing desktops via Mission Control, default on (-create=false to skip)
   -fullscreen  restore: re-fullscreen windows that were fullscreen when saved
+  -converge D  restore: keep reconciling as apps launch, up to D (quiet-exit after 2m idle; login agent uses 10m)
 `)
 	os.Exit(2)
 }
@@ -63,6 +69,7 @@ func main() {
 	frames := fs.Bool("frames", false, "also restore window position/size, not just space")
 	create := fs.Bool("create", true, "recreate missing spaces via Mission Control (flashy)")
 	fullscreen := fs.Bool("fullscreen", false, "re-fullscreen windows that were fullscreen at save time")
+	converge := fs.Duration("converge", 0, "keep reconciling as apps launch, up to this long")
 	fs.Parse(os.Args[2:])
 
 	var err error
@@ -70,7 +77,7 @@ func main() {
 	case "save":
 		err = saveCmd(*file, *keep)
 	case "restore":
-		err = restoreCmd(*file, *from, *latest, *highWater, *settled, *dryRun, *frames, *create, *fullscreen)
+		err = restoreCmd(*file, *from, *latest, *highWater, *settled, *dryRun, *frames, *create, *fullscreen, *converge)
 	case "list":
 		err = listCmd()
 	case "show":
@@ -458,7 +465,7 @@ func saveCmd(explicit string, keep int) error {
 	return nil
 }
 
-func restoreCmd(explicit, from string, latest, highWater bool, settle time.Duration, dryRun, frames, create, fullscreen bool) error {
+func restoreCmd(explicit, from string, latest, highWater bool, settle time.Duration, dryRun, frames, create, fullscreen bool, converge time.Duration) error {
 	l, path, err := resolveSnapshot(explicit, from, latest, highWater, settle)
 	if err != nil {
 		return err
@@ -477,40 +484,162 @@ func restoreCmd(explicit, from string, latest, highWater bool, settle time.Durat
 	st := l.Stats()
 	fmt.Printf("restoring %s snapshot %s (saved %s): %d windows, %s\n",
 		which, filepath.Base(path), l.SavedAt.Format("2006-01-02 15:04"), st.Windows, displaySummary(st))
+	if converge > 0 && !dryRun {
+		return convergeRestore(l, frames, create, fullscreen, converge)
+	}
 	return restoreLayout(l, dryRun, frames, create, fullscreen)
 }
 
-func restoreLayout(l layout.Layout, dryRun, frames, create, fullscreen bool) error {
+// convergeRestore runs an immediate pass, then keeps reconciling: a pass
+// ~1.5s after each app launch (windows map in shortly after the process
+// starts) and a 15s safety tick for apps that launched before the observer
+// or map windows late. Handled windows are never re-acted on. It stops when
+// every saved window is handled, when nothing has happened for quietExit
+// (no launch event, no new match — the login storm is over), or at the hard
+// cap. The cap is a backstop, not a tuning knob: quiet-exit ends the common
+// case.
+const quietExit = 2 * time.Minute
 
+func convergeRestore(l layout.Layout, frames, create, fullscreen bool, window time.Duration) error {
+	handled := make(map[int]bool)
+	pass := func(create bool) (bool, error) {
+		s, err := gather()
+		if err != nil {
+			return false, err
+		}
+		if create {
+			if s, err = createMissingSpaces(l, s, false); err != nil {
+				return false, err
+			}
+		}
+		st, err := applyPass(l, s, handled, frames, fullscreen)
+		if err != nil {
+			return false, err
+		}
+		if st.matched > 0 {
+			fmt.Printf("converge: +%d matched (%d moved, %d in place), %d/%d total\n",
+				st.matched, st.moved, st.inPlace, len(handled), len(l.Windows))
+		}
+		return len(handled) == len(l.Windows), nil
+	}
+
+	done, err := pass(create)
+	if err != nil || done {
+		fmt.Printf("converged: %d/%d saved windows handled\n", len(handled), len(l.Windows))
+		return err
+	}
+
+	appwatch.Start()
+	finished := make(chan error, 1)
+	go func() {
+		defer appwatch.Stop()
+		deadline := time.After(window)
+		tick := time.NewTicker(15 * time.Second)
+		defer tick.Stop()
+		lastActivity := time.Now()
+		for {
+			select {
+			case name := <-appwatch.Events():
+				lastActivity = time.Now()
+				time.Sleep(1500 * time.Millisecond) // let the app map its windows
+				before := len(handled)
+				done, err := pass(false)
+				if len(handled) > before {
+					lastActivity = time.Now()
+				}
+				if err != nil || done {
+					if name != "" && done {
+						fmt.Printf("converge: complete after %s launched\n", name)
+					}
+					finished <- err
+					return
+				}
+			case <-tick.C:
+				before := len(handled)
+				done, err := pass(false)
+				if len(handled) > before {
+					lastActivity = time.Now()
+				}
+				if err != nil || done {
+					finished <- err
+					return
+				}
+				if time.Since(lastActivity) > quietExit {
+					fmt.Printf("converge: quiet for %s, stopping\n", quietExit)
+					finished <- nil
+					return
+				}
+			case <-deadline:
+				finished <- nil
+				return
+			}
+		}
+	}()
+	appwatch.Run() // blocks the main thread pumping AppKit notifications
+	err = <-finished
+	fmt.Printf("converged: %d/%d saved windows handled\n", len(handled), len(l.Windows))
+	return err
+}
+
+func restoreLayout(l layout.Layout, dryRun, frames, create, fullscreen bool) error {
 	s, err := gather()
 	if err != nil {
 		return err
 	}
-
-	// Recreate missing spaces first, so windows have somewhere to land.
 	if create {
-		deficits := layout.SpaceDeficits(l.Spaces, s.displays)
-		want := 0
-		for _, d := range deficits {
-			want += d
-		}
-		if want > 0 {
-			if dryRun {
-				fmt.Printf("would create %d missing desktop(s) via Mission Control\n", want)
-			} else {
-				fmt.Printf("creating %d missing desktop(s) via Mission Control...\n", want)
-				added, err := skylight.AddSpaces(deficits)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: space creation incomplete (%d/%d): %v\n", added, want, err)
-				}
-				// Re-read state so the new spaces are resolvable by index.
-				if s, err = gather(); err != nil {
-					return err
-				}
-			}
+		if s, err = createMissingSpaces(l, s, dryRun); err != nil {
+			return err
 		}
 	}
+	if dryRun {
+		return dryRunReport(l, s, frames, fullscreen)
+	}
+	st, err := applyPass(l, s, make(map[int]bool), frames, fullscreen)
+	if err != nil {
+		return err
+	}
+	printSummary(l, st, frames, fullscreen, false)
+	return nil
+}
 
+// createMissingSpaces recreates desktops the layout needs that no longer
+// exist, then re-reads state so the new spaces are resolvable by index. In a
+// dry run it only reports what would be created.
+func createMissingSpaces(l layout.Layout, s *snapshot, dryRun bool) (*snapshot, error) {
+	deficits := layout.SpaceDeficits(l.Spaces, s.displays)
+	want := 0
+	for _, d := range deficits {
+		want += d
+	}
+	if want == 0 {
+		return s, nil
+	}
+	if dryRun {
+		fmt.Printf("would create %d missing desktop(s) via Mission Control\n", want)
+		return s, nil
+	}
+	fmt.Printf("creating %d missing desktop(s) via Mission Control...\n", want)
+	added, err := skylight.AddSpaces(deficits)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: space creation incomplete (%d/%d): %v\n", added, want, err)
+	}
+	return gather()
+}
+
+// passStats reports what one reconcile pass did.
+type passStats struct {
+	matched, moved, verified, inPlace, unresolved int
+	framed, frameErr                              int
+	fsDone, fsSkip, fsFail, fsWant                int
+}
+
+// applyPass matches l.Windows against the gathered state s and acts on the
+// matches whose saved index is not yet in handled: moves them to their saved
+// space (and optionally frames/fullscreens them), then marks them handled.
+// Windows handled in an earlier pass are never touched again, so convergence
+// cannot fight the user's own rearranging.
+func applyPass(l layout.Layout, s *snapshot, handled map[int]bool, frames, fullscreen bool) (passStats, error) {
+	var st passStats
 	resolved := layout.ResolveSpaces(l.Spaces, s.displays)
 	matched := layout.Match(l.Windows, s.windows)
 
@@ -519,114 +648,138 @@ func restoreLayout(l layout.Layout, dryRun, frames, create, fullscreen bool) err
 		pidByWindow[w.ID] = w.OwnerPID
 	}
 
-	moves := make(map[uint64][]uint32) // target space ID -> window IDs
-	skipped, unresolved := 0, 0
+	fresh := make(map[int]uint32) // this pass's new matches
 	for si, wid := range matched {
+		if handled[si] {
+			continue
+		}
+		fresh[si] = wid
+		handled[si] = true
+	}
+	st.matched = len(fresh)
+
+	moves := make(map[uint64][]uint32) // target space ID -> window IDs
+	for si, wid := range fresh {
 		if l.Windows[si].Fullscreen {
+			st.fsWant++
 			continue // handled by the fullscreen pass, not a space move
 		}
 		target, ok := resolved[l.Windows[si].SpaceUUID]
 		if !ok {
-			unresolved++
+			st.unresolved++
 			continue
 		}
 		if s.winSpace[wid] == target {
-			skipped++
-			continue
-		}
-		if dryRun {
-			fmt.Printf("would move %q %q (window %d) -> space %d\n",
-				l.Windows[si].OwnerName, l.Windows[si].Title, wid, target)
+			st.inPlace++
 			continue
 		}
 		moves[target] = append(moves[target], wid)
 	}
 
-	moveCount := 0
 	for target, wids := range moves {
 		if err := skylight.MoveWindowsToSpace(wids, target); err != nil {
-			return fmt.Errorf("moving %d windows to space %d: %w", len(wids), target, err)
+			return st, fmt.Errorf("moving %d windows to space %d: %w", len(wids), target, err)
 		}
-		moveCount += len(wids)
+		st.moved += len(wids)
 	}
-
-	verified := 0
-	if moveCount > 0 {
+	if st.moved > 0 {
 		// The bridged operation is asynchronous; give it a beat, then check.
 		time.Sleep(500 * time.Millisecond)
 		for target, wids := range moves {
 			for _, wid := range wids {
 				ids, err := skylight.SpacesForWindow(wid)
 				if err == nil && len(ids) == 1 && ids[0] == target {
-					verified++
+					st.verified++
 				}
 			}
 		}
 	}
 
-	framed, frameErr := 0, 0
-	if frames && !dryRun {
-		for si, wid := range matched {
+	if frames {
+		for si, wid := range fresh {
 			if l.Windows[si].Fullscreen {
 				continue // these get fullscreened, not framed
 			}
 			f := l.Windows[si].Frame
 			if err := skylight.SetWindowFrame(pidByWindow[wid], wid, f.X, f.Y, f.W, f.H); err != nil {
-				frameErr++
+				st.frameErr++
 				continue
 			}
-			framed++
+			st.framed++
 		}
 	}
 
 	// Re-fullscreen windows that were fullscreen at save time. Each transition
 	// creates a fullscreen space and animates, so this runs last.
-	fsDone, fsSkip, fsFail := 0, 0, 0
-	wantFS := 0
-	for si := range matched {
-		if l.Windows[si].Fullscreen {
-			wantFS++
-		}
-	}
-	if fullscreen && wantFS > 0 {
-		if dryRun {
-			fmt.Printf("would restore %d fullscreen window(s)\n", wantFS)
-		} else {
-			for si, wid := range matched {
-				if !l.Windows[si].Fullscreen {
-					continue
-				}
-				switch skylight.SetFullscreen(pidByWindow[wid], wid, true) {
-				case skylight.FullscreenChanged:
-					fsDone++
-				case skylight.FullscreenAlready:
-					fsSkip++
-				default:
-					fsFail++
-				}
+	if fullscreen {
+		for si, wid := range fresh {
+			if !l.Windows[si].Fullscreen {
+				continue
+			}
+			switch skylight.SetFullscreen(pidByWindow[wid], wid, true) {
+			case skylight.FullscreenChanged:
+				st.fsDone++
+			case skylight.FullscreenAlready:
+				st.fsSkip++
+			default:
+				st.fsFail++
 			}
 		}
 	}
+	return st, nil
+}
 
+// dryRunReport prints what a restore pass would do, in the same shape as the
+// real pass's summary.
+func dryRunReport(l layout.Layout, s *snapshot, frames, fullscreen bool) error {
+	resolved := layout.ResolveSpaces(l.Spaces, s.displays)
+	matched := layout.Match(l.Windows, s.windows)
+	var st passStats
+	st.matched = len(matched)
+	for si, wid := range matched {
+		if l.Windows[si].Fullscreen {
+			st.fsWant++
+			continue
+		}
+		target, ok := resolved[l.Windows[si].SpaceUUID]
+		if !ok {
+			st.unresolved++
+			continue
+		}
+		if s.winSpace[wid] == target {
+			st.inPlace++
+			continue
+		}
+		fmt.Printf("would move %q %q (window %d) -> space %d\n",
+			l.Windows[si].OwnerName, l.Windows[si].Title, wid, target)
+	}
+	if fullscreen && st.fsWant > 0 {
+		fmt.Printf("would restore %d fullscreen window(s)\n", st.fsWant)
+	}
+	printSummary(l, st, frames, fullscreen, true)
+	return nil
+}
+
+// printSummary prints the one-line result a restore has always printed.
+func printSummary(l layout.Layout, st passStats, frames, fullscreen, dryRun bool) {
 	fmt.Printf("matched %d/%d saved windows; moved %d (%d verified), %d already in place",
-		len(matched), len(l.Windows), moveCount, verified, skipped)
-	if unresolved > 0 {
-		fmt.Printf(", %d on spaces that no longer exist", unresolved)
+		st.matched, len(l.Windows), st.moved, st.verified, st.inPlace)
+	if st.unresolved > 0 {
+		fmt.Printf(", %d on spaces that no longer exist", st.unresolved)
 	}
 	if frames && !dryRun {
-		fmt.Printf("; restored %d frames", framed)
-		if frameErr > 0 {
-			fmt.Printf(" (%d failed — apps that refuse AX resize, or Accessibility not granted)", frameErr)
+		fmt.Printf("; restored %d frames", st.framed)
+		if st.frameErr > 0 {
+			fmt.Printf(" (%d failed — apps that refuse AX resize, or Accessibility not granted)", st.frameErr)
 		}
 	}
-	if fullscreen && !dryRun && wantFS > 0 {
-		fmt.Printf("; fullscreened %d (%d already, %d unsupported/failed)", fsDone, fsSkip, fsFail)
-	} else if !fullscreen && wantFS > 0 {
-		fmt.Printf("; %d fullscreen window(s) skipped (use -fullscreen)", wantFS)
+	if fullscreen && !dryRun && st.fsWant > 0 {
+		fmt.Printf("; fullscreened %d (%d already, %d unsupported/failed)", st.fsDone, st.fsSkip, st.fsFail)
+	} else if !fullscreen && st.fsWant > 0 {
+		fmt.Printf("; %d fullscreen window(s) skipped (use -fullscreen)", st.fsWant)
 	}
 	fmt.Println()
-	if moveCount > 0 && verified < moveCount {
+	if st.moved > 0 && st.verified < st.moved {
 		fmt.Fprintln(os.Stderr, "warning: some moves did not verify — the bridged-move API may be restricted on this macOS build")
 	}
-	return nil
 }

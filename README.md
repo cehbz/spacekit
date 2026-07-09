@@ -100,6 +100,7 @@ spacekeeper restore -high-water   restore the richest retained snapshot
 spacekeeper restore -frames   also restore each window's position and size
 spacekeeper restore -create=false   skip recreating missing desktops
 spacekeeper restore -fullscreen   also re-fullscreen windows that were fullscreen
+spacekeeper restore -converge 10m  keep reconciling as apps launch (quiet-exit after 2m idle)
 spacekeeper show [-from ID]   print a snapshot's raw layout
 ```
 
@@ -113,7 +114,7 @@ Run `save` periodically with the opt-in agent (`make save-agent-install`), so a 
 
 `-frames` repositions and resizes via the Accessibility API. It only affects windows on the **currently active space** — macOS won't let AX resize a window that lives on another space, so frame restore is partial unless you run it per-space. Space assignment (the default) has no such limit. Grant the running process Accessibility for `-frames` to do anything.
 
-Restore at login is available as an opt-in agent (`make restore-agent-install` / `restore-agent-uninstall`); it waits a settle period for apps to reopen their windows, then restores space assignments. See `dist/bz.ceh.spacekeeper-restore.plist`.
+Restore at login is available as an opt-in agent (`make restore-agent-install` / `restore-agent-uninstall`); it restores immediately and then converges — each app-launch notification (plus a periodic sweep) triggers another matching pass over the still-unhandled saved windows, so windows land as their apps finish reopening. It stops when everything is placed, after two quiet minutes with no launches and no new matches, or at a 10-minute hard cap. Windows already handled are never touched again, so rearranging by hand during convergence is safe. See `dist/bz.ceh.spacekeeper-restore.plist`.
 
 The read side is SkyLight introspection (`SLSCopyManagedDisplaySpaces`, `SLSCopySpacesForWindows`), callable from any process. The write side is `SLSBridgedMoveWindowsToManagedSpaceOperation`, the bridged operation that works with SIP enabled since macOS 26.4. It is private and may vanish in any update; spacekeeper resolves it at runtime and reports clearly when it is unavailable. Verified working on macOS 26.5.
 

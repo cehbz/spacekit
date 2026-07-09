@@ -3,10 +3,13 @@
 <!--
   Optional: restore window-to-space assignments at login.
 
-  Apps reopen their windows asynchronously after login, so the restore waits a
-  settle period first; windows that have not reappeared yet will not match.
-  Adjust the sleep to taste. Frame restore is intentionally omitted here
-  because AX can only resize windows on the active space.
+  Restores the newest settled previous-boot snapshot (the layout as of the
+  last shutdown), then converges: as each app finishes launching its windows
+  are matched and moved, so slow logins don't lose windows to a fixed settle
+  delay. Stops when everything is placed, after 2 quiet minutes (no launches,
+  no new matches), or at the 10m hard cap — the cap is a backstop, not a
+  tuning knob. Frame restore is intentionally omitted here because AX can
+  only resize windows on the active space.
 
   Install/remove via `make restore-agent-install` / `make restore-agent-uninstall`.
 -->
@@ -18,7 +21,7 @@
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>sleep 25; exec "$HOME/bin/spacekeeper" restore</string>
+		<string>exec "$HOME/bin/spacekeeper" restore -converge 10m</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
