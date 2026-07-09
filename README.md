@@ -93,9 +93,10 @@ go build -o spacekeeper ./cmd/spacekeeper
 
 spacekeeper save              snapshot the current layout into history
 spacekeeper list              list snapshots, newest first
-spacekeeper restore [-n]      restore the high-water snapshot; -n prints the plan
+spacekeeper restore [-n]      restore the last pre-shutdown layout; -n prints the plan
 spacekeeper restore -latest   restore the newest snapshot instead
 spacekeeper restore -from ID  restore a specific snapshot (timestamp substring from `list`)
+spacekeeper restore -high-water   restore the richest retained snapshot
 spacekeeper restore -frames   also restore each window's position and size
 spacekeeper restore -create=false   skip recreating missing desktops
 spacekeeper restore -fullscreen   also re-fullscreen windows that were fullscreen
@@ -106,9 +107,9 @@ spacekeeper show [-from ID]   print a snapshot's raw layout
 
 `save` writes a timestamped snapshot under `~/.config/spacekeeper/snapshots/`, deduped (nothing is written when the layout is unchanged) and pruned to the last `-keep` (default 200). It captures everything, with no judgment about whether a state is "good" — so an accidental window-nuke, a disconnected monitor, or an update closing windows all get recorded, but none of them destroy earlier snapshots.
 
-`restore` defaults to the **high-water snapshot** — the richest retained arrangement, ranked transparently by display count, then window count, then recency. That is almost always the full layout you want back. The richest snapshot is also pinned so pruning never deletes it, even when it is old. If the high-water pick looks wrong, `list` shows every snapshot with descriptive facts only (timestamp, window count, spaces per display) so you choose, and `restore -from <id>` or `-latest` overrides.
+`restore` defaults to the newest **settled previous-boot snapshot** — the layout as it was at the last shutdown. Snapshots taken shortly after a boot (uptime at save below `-settled`, default 10m) are skipped, so a login-time snapshot of the not-yet-reopened session — or a whole cycle of quick reboots — never becomes the thing that gets restored. `-high-water` selects the richest retained arrangement instead (ranked by display count, then window count, then recency); the richest snapshot is still pinned so pruning never deletes it. If the default pick looks wrong, `list` shows every snapshot with descriptive facts and boot tags (`[this-boot]`, `[unsettled]`) so you choose, and `restore -from <id>` or `-latest` overrides.
 
-Run `save` periodically with the opt-in agent (`make save-agent-install`), so a good layout is always captured minutes before any reboot or outage. Because the agent stops at shutdown, an update closing windows during shutdown is never snapshotted — the newest snapshot stays the last good pre-reboot one.
+Run `save` periodically with the opt-in agent (`make save-agent-install`), so a good layout is always captured minutes before any reboot or outage. The agent also snapshots right after login (RunAtLoad), before apps have reopened — that early capture is tagged `[this-boot]`/`[unsettled]` in `list` and skipped by restore's default selection, so it pollutes nothing.
 
 `-frames` repositions and resizes via the Accessibility API. It only affects windows on the **currently active space** — macOS won't let AX resize a window that lives on another space, so frame restore is partial unless you run it per-space. Space assignment (the default) has no such limit. Grant the running process Accessibility for `-frames` to do anything.
 

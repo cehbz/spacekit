@@ -26,15 +26,19 @@ func usage() {
 
 commands:
   save      snapshot current window-to-space assignments to history
-  restore   move windows back to a snapshot's spaces (default: the high-water snapshot)
+  restore   move windows back to a snapshot's spaces
+            (default: newest settled snapshot from a previous boot — the
+            layout as of the last shutdown)
   list      list saved snapshots, newest first
   show      print a snapshot's raw layout
 
 flags (after the command):
   -f path   use an explicit file instead of the snapshot history
   -keep N   save: snapshots to retain, plus the high-water (default 200)
-  -from id  restore/show: snapshot to use (timestamp substring); default is high-water
-  -latest   restore/show: use the newest snapshot instead of the high-water
+  -from id  restore/show: snapshot to use (timestamp substring)
+  -latest   restore/show: use the newest snapshot
+  -high-water  restore/show: use the richest snapshot (the old default)
+  -settled D   minimum uptime at save for the default pick (default 10m)
   -n        restore: dry run, print the plan without changing anything
   -frames   restore: also restore each window's position and size (needs Accessibility)
   -create   restore: recreate missing desktops via Mission Control, default on (-create=false to skip)
@@ -51,7 +55,9 @@ func main() {
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
 	file := fs.String("f", "", "explicit layout file (overrides snapshot history)")
 	from := fs.String("from", "", "snapshot id/substring to use")
-	latest := fs.Bool("latest", false, "use the newest snapshot instead of the high-water")
+	latest := fs.Bool("latest", false, "use the newest snapshot")
+	highWater := fs.Bool("high-water", false, "use the high-water (richest) snapshot, the old default")
+	settled := fs.Duration("settled", 10*time.Minute, "minimum uptime at save time for a snapshot to count as settled")
 	keep := fs.Int("keep", 200, "snapshots to retain")
 	dryRun := fs.Bool("n", false, "dry run")
 	frames := fs.Bool("frames", false, "also restore window position/size, not just space")
@@ -64,11 +70,11 @@ func main() {
 	case "save":
 		err = saveCmd(*file, *keep)
 	case "restore":
-		err = restoreCmd(*file, *from, *latest, *dryRun, *frames, *create, *fullscreen)
+		err = restoreCmd(*file, *from, *latest, *highWater, *settled, *dryRun, *frames, *create, *fullscreen)
 	case "list":
 		err = listCmd()
 	case "show":
-		err = showCmd(*file, *from, *latest)
+		err = showCmd(*file, *from, *latest, *highWater, *settled)
 	default:
 		usage()
 	}
@@ -200,8 +206,10 @@ func displaySummary(st layout.Stats) string {
 }
 
 // resolveSnapshot selects which layout to act on: an explicit file, a -from
-// match, the newest (-latest), or the high-water default.
-func resolveSnapshot(explicit, from string, latest bool) (layout.Layout, string, error) {
+// match, the newest (-latest), the richest (-high-water), or the default —
+// the newest settled snapshot from a previous boot session, i.e. the layout
+// as of the last shutdown (see layout.DefaultRestoreIndex).
+func resolveSnapshot(explicit, from string, latest, highWater bool, settle time.Duration) (layout.Layout, string, error) {
 	if explicit != "" {
 		l, err := loadLayout(explicit)
 		return l, explicit, err
@@ -224,8 +232,16 @@ func resolveSnapshot(explicit, from string, latest bool) (layout.Layout, string,
 	if latest {
 		return refs[0].l, refs[0].path, nil
 	}
-	hw := highWaterSnap(refs)
-	return hw.l, hw.path, nil
+	if highWater {
+		hw := highWaterSnap(refs)
+		return hw.l, hw.path, nil
+	}
+	ls := make([]layout.Layout, len(refs))
+	for i, r := range refs {
+		ls[i] = r.l
+	}
+	i := layout.DefaultRestoreIndex(ls, bootTime(), settle)
+	return refs[i].l, refs[i].path, nil
 }
 
 func listCmd() error {
@@ -238,6 +254,7 @@ func listCmd() error {
 		return nil
 	}
 	hw := highWaterSnap(refs)
+	boot := bootTime()
 	for i, r := range refs {
 		st := r.l.Stats()
 		tags := ""
@@ -247,14 +264,19 @@ func listCmd() error {
 		if hw != nil && r.path == hw.path {
 			tags += " [high-water]"
 		}
+		if !boot.IsZero() && !r.l.SavedAt.Before(boot) {
+			tags += " [this-boot]"
+		} else if !r.l.BootedAt.IsZero() && r.l.SavedAt.Sub(r.l.BootedAt) < 10*time.Minute {
+			tags += " [unsettled]"
+		}
 		fmt.Printf("%s  %2d windows  %s%s\n",
 			r.l.SavedAt.Format("2006-01-02 15:04:05"), st.Windows, displaySummary(st), tags)
 	}
 	return nil
 }
 
-func showCmd(explicit, from string, latest bool) error {
-	l, path, err := resolveSnapshot(explicit, from, latest)
+func showCmd(explicit, from string, latest, highWater bool, settle time.Duration) error {
+	l, path, err := resolveSnapshot(explicit, from, latest, highWater, settle)
 	if err != nil {
 		return err
 	}
@@ -379,7 +401,7 @@ func gather() (*snapshot, error) {
 
 // buildLayout turns a gathered snapshot into a saveable layout.
 func buildLayout(s *snapshot) layout.Layout {
-	l := layout.Layout{SavedAt: time.Now(), Spaces: s.spaces}
+	l := layout.Layout{SavedAt: time.Now(), BootedAt: bootTime(), Spaces: s.spaces}
 	for _, w := range s.windows {
 		sw := layout.SavedWindow{
 			BundleID:  w.BundleID,
@@ -436,12 +458,12 @@ func saveCmd(explicit string, keep int) error {
 	return nil
 }
 
-func restoreCmd(explicit, from string, latest, dryRun, frames, create, fullscreen bool) error {
-	l, path, err := resolveSnapshot(explicit, from, latest)
+func restoreCmd(explicit, from string, latest, highWater bool, settle time.Duration, dryRun, frames, create, fullscreen bool) error {
+	l, path, err := resolveSnapshot(explicit, from, latest, highWater, settle)
 	if err != nil {
 		return err
 	}
-	which := "high-water"
+	which := "previous-boot"
 	switch {
 	case explicit != "":
 		which = "file"
@@ -449,6 +471,8 @@ func restoreCmd(explicit, from string, latest, dryRun, frames, create, fullscree
 		which = "selected"
 	case latest:
 		which = "latest"
+	case highWater:
+		which = "high-water"
 	}
 	st := l.Stats()
 	fmt.Printf("restoring %s snapshot %s (saved %s): %d windows, %s\n",
