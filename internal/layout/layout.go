@@ -37,9 +37,12 @@ type SavedWindow struct {
 }
 
 type Layout struct {
-	SavedAt time.Time     `json:"savedAt"`
-	Spaces  []SavedSpace  `json:"spaces"`
-	Windows []SavedWindow `json:"windows"`
+	SavedAt time.Time `json:"savedAt"`
+	// BootedAt is the boot time of the session that saved this layout.
+	// Zero for snapshots predating the field.
+	BootedAt time.Time     `json:"bootedAt"`
+	Spaces   []SavedSpace  `json:"spaces"`
+	Windows  []SavedWindow `json:"windows"`
 }
 
 // DisplaySpaces is the count of user desktops on one display.
@@ -85,6 +88,34 @@ func Richer(a, b Layout) bool {
 		return as.Windows > bs.Windows
 	}
 	return a.SavedAt.After(b.SavedAt)
+}
+
+// DefaultRestoreIndex picks the snapshot restore should use by default: the
+// newest snapshot saved in a previous boot session after that session had
+// settled (uptime at save >= settle). Post-boot scrambles — snapshots taken
+// right after login, before apps reopen — are thereby skipped, including ones
+// from earlier boots in a rapid reboot cycle. Falls back to the newest
+// previous-boot snapshot, then the newest overall. Legacy snapshots (zero
+// BootedAt) can't prove uptime and are trusted as settled. A zero boot means
+// the boot time is unknown: only the newest-overall tier applies.
+// Returns -1 only when ls is empty.
+func DefaultRestoreIndex(ls []Layout, boot time.Time, settle time.Duration) int {
+	best := -1
+	bestTier := 0 // higher wins; recency breaks ties within a tier
+	for i, l := range ls {
+		tier := 1
+		if !boot.IsZero() && l.SavedAt.Before(boot) {
+			tier = 2
+			if l.BootedAt.IsZero() || l.SavedAt.Sub(l.BootedAt) >= settle {
+				tier = 3
+			}
+		}
+		if best == -1 || tier > bestTier ||
+			(tier == bestTier && l.SavedAt.After(ls[best].SavedAt)) {
+			best, bestTier = i, tier
+		}
+	}
+	return best
 }
 
 // Signature is a stable fingerprint of a layout's content (spaces and windows,
