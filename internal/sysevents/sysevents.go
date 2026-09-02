@@ -1,7 +1,8 @@
 // Package sysevents surfaces the macOS notifications the watcher acts on as
 // one Go channel: app launches, display reconfiguration, screen and system
-// sleep/wake, and active-space changes. Delivery needs a run loop on the main
-// OS thread: call Run there; it blocks until Stop. OnMain runs a function on
+// sleep/wake, and active-space changes. Delivery needs the AppKit event loop
+// on the main OS thread (see sysevents.m for why a plain run loop is not
+// enough): call Run there; it blocks until Stop. OnMain runs a function on
 // that thread, which is where SkyLight and Accessibility work belongs.
 package sysevents
 
@@ -89,8 +90,7 @@ func Events() <-chan Event { return events }
 // Start registers the observers. Call before Run.
 func Start() { C.sysevents_start() }
 
-// Run pumps the main run loop until Stop. Must run on the main OS thread or
-// NSWorkspace notifications are not delivered.
+// Run runs the AppKit event loop until Stop. Must run on the main OS thread.
 func Run() { C.sysevents_run() }
 
 // Stop ends Run. Safe from any goroutine.
