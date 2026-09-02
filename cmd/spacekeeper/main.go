@@ -18,9 +18,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cehbz/spacekit/internal/appwatch"
 	"github.com/cehbz/spacekit/internal/layout"
 	"github.com/cehbz/spacekit/internal/skylight"
+	"github.com/cehbz/spacekit/internal/sysevents"
 )
 
 // The AppKit run loop used by -converge must own the main OS thread.
@@ -501,63 +501,57 @@ func restoreCmd(explicit, from string, latest, highWater bool, settle time.Durat
 const quietExit = 2 * time.Minute
 
 func convergeRestore(l layout.Layout, frames, create, fullscreen bool, window time.Duration) error {
-	handled := make(map[int]bool)
+	r := newReconciler(l, frames, fullscreen)
 	pass := func(create bool) (bool, error) {
-		s, err := gather()
-		if err != nil {
-			return false, err
-		}
-		if create {
-			if s, err = createMissingSpaces(l, s, false); err != nil {
-				return false, err
-			}
-		}
-		st, err := applyPass(l, s, handled, frames, fullscreen)
+		done, st, err := r.pass(create)
 		if err != nil {
 			return false, err
 		}
 		if st.matched > 0 {
-			fmt.Printf("converge: +%d matched (%d moved, %d in place), %d/%d total\n",
-				st.matched, st.moved, st.inPlace, len(handled), len(l.Windows))
+			fmt.Printf("converge: +%d matched (%d moved, %d in place), %s total\n",
+				st.matched, st.moved, st.inPlace, r.progress())
 		}
-		return len(handled) == len(l.Windows), nil
+		return done, nil
 	}
 
 	done, err := pass(create)
 	if err != nil || done {
-		fmt.Printf("converged: %d/%d saved windows handled\n", len(handled), len(l.Windows))
+		fmt.Printf("converged: %s saved windows handled\n", r.progress())
 		return err
 	}
 
-	appwatch.Start()
+	sysevents.Start()
 	finished := make(chan error, 1)
 	go func() {
-		defer appwatch.Stop()
+		defer sysevents.Stop()
 		deadline := time.After(window)
 		tick := time.NewTicker(15 * time.Second)
 		defer tick.Stop()
 		lastActivity := time.Now()
 		for {
 			select {
-			case name := <-appwatch.Events():
+			case e := <-sysevents.Events():
+				if e.Kind != sysevents.AppLaunched {
+					continue
+				}
 				lastActivity = time.Now()
 				time.Sleep(1500 * time.Millisecond) // let the app map its windows
-				before := len(handled)
+				before := len(r.handled)
 				done, err := pass(false)
-				if len(handled) > before {
+				if len(r.handled) > before {
 					lastActivity = time.Now()
 				}
 				if err != nil || done {
-					if name != "" && done {
-						fmt.Printf("converge: complete after %s launched\n", name)
+					if e.Name != "" && done {
+						fmt.Printf("converge: complete after %s launched\n", e.Name)
 					}
 					finished <- err
 					return
 				}
 			case <-tick.C:
-				before := len(handled)
+				before := len(r.handled)
 				done, err := pass(false)
-				if len(handled) > before {
+				if len(r.handled) > before {
 					lastActivity = time.Now()
 				}
 				if err != nil || done {
@@ -575,9 +569,9 @@ func convergeRestore(l layout.Layout, frames, create, fullscreen bool, window ti
 			}
 		}
 	}()
-	appwatch.Run() // blocks the main thread pumping AppKit notifications
+	sysevents.Run() // blocks the main thread pumping AppKit notifications
 	err = <-finished
-	fmt.Printf("converged: %d/%d saved windows handled\n", len(handled), len(l.Windows))
+	fmt.Printf("converged: %s saved windows handled\n", r.progress())
 	return err
 }
 
