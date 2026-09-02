@@ -1,0 +1,262 @@
+package main
+
+import (
+	"log"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/cehbz/spacekit/internal/layout"
+	"github.com/cehbz/spacekit/internal/settle"
+	"github.com/cehbz/spacekit/internal/sysevents"
+)
+
+// Timing. A display wake produces two hotplug out/in cycles over ~6s and
+// WindowServer's own window-return attempts give up ~7s after the first, so
+// displayQuiet after the last callback lands after macOS has finished.
+const (
+	displayQuiet  = 10 * time.Second
+	spaceQuiet    = 3 * time.Second
+	launchDelay   = 1500 * time.Millisecond
+	sweepInterval = 15 * time.Second
+)
+
+type watchOptions struct {
+	interval, settle, bootCap  time.Duration
+	forceBoot                  bool
+	keep                       int
+	frames, create, fullscreen bool
+}
+
+// watcher is the resident agent: it saves on a timer and on sleep and
+// space-change events, restores after a transient display drop, and runs
+// the login convergence. All SkyLight work runs on the main thread via
+// sysevents.OnMain; this loop only decides.
+type watcher struct {
+	opt      watchOptions
+	displays *settle.Window // an open display-reconfiguration burst
+	spaces   *settle.Window // debounce for active-space changes
+
+	boot                      *reconciler // non-nil while login convergence runs
+	bootStarted, bootActivity time.Time
+}
+
+func watchCmd(o watchOptions) error {
+	log.SetFlags(log.Ldate | log.Ltime)
+	w := &watcher{opt: o, displays: settle.New(displayQuiet), spaces: settle.New(spaceQuiet)}
+	sysevents.Start()
+	go func() {
+		w.loop()
+		sysevents.Stop()
+	}()
+	sysevents.Run()
+	return nil
+}
+
+func (w *watcher) loop() {
+	tick := time.NewTicker(w.opt.interval)
+	defer tick.Stop()
+	sweep := time.NewTicker(sweepInterval)
+	defer sweep.Stop()
+
+	w.recoverPending()
+	w.startBoot()
+	w.save("startup")
+	for {
+		var settled, spaceQuietC <-chan time.Time
+		if w.displays.Open() {
+			settled = time.After(time.Until(w.displays.Deadline()))
+		}
+		if w.spaces.Open() {
+			spaceQuietC = time.After(time.Until(w.spaces.Deadline()))
+		}
+		select {
+		case e := <-sysevents.Events():
+			w.handle(e)
+		case <-tick.C:
+			w.save("interval")
+		case <-sweep.C:
+			w.sweep()
+		case <-settled:
+			w.displaysSettled()
+		case <-spaceQuietC:
+			w.spaces.Close()
+			w.save("space change")
+		}
+	}
+}
+
+func (w *watcher) handle(e sysevents.Event) {
+	switch e.Kind {
+	case sysevents.DisplayReconfigured:
+		if w.displays.Note(e.At) {
+			log.Printf("display reconfiguration began (display %d, flags %#x); holding saves", e.Display, e.Flags)
+			w.writePending(e.At)
+		}
+	case sysevents.ScreensSleep, sysevents.SystemWillSleep:
+		w.save(e.Kind.String())
+	case sysevents.SpaceChanged:
+		w.spaces.Note(e.At)
+	case sysevents.AppLaunched:
+		if w.boot != nil {
+			time.Sleep(launchDelay) // let the app map its windows
+			w.bootPass(e.Name + " launched")
+		}
+	case sysevents.ScreensWake, sysevents.SystemWake:
+		log.Printf("%s", e.Kind)
+	}
+}
+
+// --- saving ---
+
+func (w *watcher) save(reason string) {
+	if w.displays.Open() {
+		log.Printf("save (%s) held: display reconfiguration in progress", reason)
+		return
+	}
+	var path string
+	var err error
+	sysevents.OnMain(func() { path, err = saveSnapshot(w.opt.keep) })
+	switch {
+	case err != nil:
+		log.Printf("save (%s) failed: %v", reason, err)
+	case path != "":
+		if l, err := loadLayout(path); err == nil {
+			st := l.Stats()
+			log.Printf("snapshot %s (%s): %d windows, %s", filepath.Base(path), reason, st.Windows, displaySummary(st))
+		}
+	}
+}
+
+// --- transient display drop ---
+
+// pendingPath records an open display burst so a restarted watcher can still
+// finish it (crash recovery). Removed when the burst is handled.
+func pendingPath() string { return filepath.Join(dataDir(), "reconfig-pending") }
+
+func (w *watcher) writePending(at time.Time) {
+	if err := os.WriteFile(pendingPath(), []byte(at.Format(time.RFC3339Nano)), 0o600); err != nil {
+		log.Printf("could not record pending reconfiguration: %v", err)
+	}
+}
+
+func (w *watcher) recoverPending() {
+	data, err := os.ReadFile(pendingPath())
+	if err != nil {
+		return
+	}
+	start, err := time.Parse(time.RFC3339Nano, string(data))
+	if err != nil {
+		os.Remove(pendingPath())
+		return
+	}
+	w.displays.Resume(start, time.Now())
+	log.Printf("resuming display reconfiguration that began %s", start.Format("15:04:05"))
+}
+
+func (w *watcher) displaysSettled() {
+	start := w.displays.Start()
+	w.displays.Close()
+	os.Remove(pendingPath())
+	if w.boot != nil {
+		w.bootPass("displays settled")
+		return
+	}
+	refs, err := listSnapshots()
+	if err != nil {
+		log.Printf("displays settled; cannot read history: %v", err)
+		return
+	}
+	ls := make([]layout.Layout, len(refs))
+	for i, r := range refs {
+		ls[i] = r.l
+	}
+	i := layout.LatestBefore(ls, start)
+	if i < 0 {
+		log.Printf("displays settled; no snapshot predates the reconfiguration")
+		return
+	}
+	ref := refs[i]
+	sysevents.OnMain(func() {
+		s, err := gather()
+		if err != nil {
+			log.Printf("displays settled; gather failed: %v", err)
+			return
+		}
+		now := layout.Layout{Spaces: s.spaces}.Stats()
+		if !now.SameDisplays(ref.l.Stats()) {
+			log.Printf("displays settled to %s; %s had %s; not a transient drop, leaving windows alone",
+				displaySummary(now), filepath.Base(ref.path), displaySummary(ref.l.Stats()))
+			return
+		}
+		r := newReconciler(ref.l, w.opt.frames, w.opt.fullscreen)
+		_, st, err := r.passOn(s)
+		if err != nil {
+			log.Printf("displays settled; restore from %s failed: %v", filepath.Base(ref.path), err)
+			return
+		}
+		log.Printf("displays settled; restored from %s: matched %d, moved %d (%d verified), %d in place",
+			filepath.Base(ref.path), st.matched, st.moved, st.verified, st.inPlace)
+	})
+	w.save("after reconfiguration")
+}
+
+// --- login convergence ---
+
+func (w *watcher) startBoot() {
+	boot := bootTime()
+	if !w.opt.forceBoot && (boot.IsZero() || time.Since(boot) > w.opt.settle) {
+		return
+	}
+	l, path, err := resolveSnapshot("", "", false, false, w.opt.settle)
+	if err != nil {
+		log.Printf("login convergence skipped: %v", err)
+		return
+	}
+	st := l.Stats()
+	log.Printf("login convergence from %s (saved %s): %d windows, %s",
+		filepath.Base(path), l.SavedAt.Format("2006-01-02 15:04"), st.Windows, displaySummary(st))
+	w.boot = newReconciler(l, w.opt.frames, w.opt.fullscreen)
+	w.bootStarted, w.bootActivity = time.Now(), time.Now()
+	w.bootPassCreate("startup", w.opt.create)
+}
+
+func (w *watcher) bootPass(trigger string) { w.bootPassCreate(trigger, false) }
+
+func (w *watcher) bootPassCreate(trigger string, create bool) {
+	var done bool
+	var st passStats
+	var err error
+	sysevents.OnMain(func() { done, st, err = w.boot.pass(create) })
+	if err != nil {
+		log.Printf("login convergence (%s) failed: %v", trigger, err)
+		return
+	}
+	if st.matched > 0 {
+		w.bootActivity = time.Now()
+		log.Printf("login convergence (%s): +%d matched (%d moved, %d verified, %d in place), %s handled",
+			trigger, st.matched, st.moved, st.verified, st.inPlace, w.boot.progress())
+	}
+	if done {
+		log.Printf("login convergence complete (%s)", trigger)
+		w.boot = nil
+	}
+}
+
+func (w *watcher) sweep() {
+	if w.boot == nil {
+		return
+	}
+	w.bootPass("sweep")
+	if w.boot == nil {
+		return
+	}
+	switch {
+	case time.Since(w.bootActivity) > quietExit:
+		log.Printf("login convergence: quiet for %s, stopping at %s", quietExit, w.boot.progress())
+		w.boot = nil
+	case time.Since(w.bootStarted) > w.opt.bootCap:
+		log.Printf("login convergence: cap %s reached, stopping at %s", w.opt.bootCap, w.boot.progress())
+		w.boot = nil
+	}
+}

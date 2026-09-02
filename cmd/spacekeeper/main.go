@@ -36,6 +36,8 @@ commands:
             layout as of the last shutdown)
   list      list saved snapshots, newest first
   show      print a snapshot's raw layout
+  watch     run resident: periodic and event-driven saves, restore after a
+            transient display drop, and login convergence (the launchd agent)
 
 flags (after the command):
   -f path   use an explicit file instead of the snapshot history
@@ -49,6 +51,9 @@ flags (after the command):
   -create   restore: recreate missing desktops via Mission Control, default on (-create=false to skip)
   -fullscreen  restore: re-fullscreen windows that were fullscreen when saved
   -converge D  restore: keep reconciling as apps launch, up to D (quiet-exit after 2m idle; login agent uses 10m)
+  -interval D  watch: periodic save interval (default 3m)
+  -boot        watch: run login convergence even if uptime exceeds -settled
+  -boot-cap D  watch: hard cap on login convergence (default 10m)
 `)
 	os.Exit(2)
 }
@@ -70,6 +75,9 @@ func main() {
 	create := fs.Bool("create", true, "recreate missing spaces via Mission Control (flashy)")
 	fullscreen := fs.Bool("fullscreen", false, "re-fullscreen windows that were fullscreen at save time")
 	converge := fs.Duration("converge", 0, "keep reconciling as apps launch, up to this long")
+	interval := fs.Duration("interval", 3*time.Minute, "watch: periodic save interval")
+	forceBoot := fs.Bool("boot", false, "watch: run login convergence regardless of uptime")
+	bootCap := fs.Duration("boot-cap", 10*time.Minute, "watch: hard cap on login convergence")
 	fs.Parse(os.Args[2:])
 
 	var err error
@@ -82,6 +90,11 @@ func main() {
 		err = listCmd()
 	case "show":
 		err = showCmd(*file, *from, *latest, *highWater, *settled)
+	case "watch":
+		err = watchCmd(watchOptions{
+			interval: *interval, settle: *settled, bootCap: *bootCap, forceBoot: *forceBoot,
+			keep: *keep, frames: *frames, create: *create, fullscreen: *fullscreen,
+		})
 	default:
 		usage()
 	}
@@ -427,6 +440,26 @@ func buildLayout(s *snapshot) layout.Layout {
 	return l
 }
 
+// saveSnapshot writes the current layout into history unless it is identical
+// to the newest snapshot. It returns the written path, or "" when unchanged.
+func saveSnapshot(keep int) (string, error) {
+	s, err := gather()
+	if err != nil {
+		return "", err
+	}
+	l := buildLayout(s)
+	refs, _ := listSnapshots()
+	if n := newestSnap(refs); n != nil && n.l.Signature() == l.Signature() {
+		return "", nil
+	}
+	path := filepath.Join(snapshotsDir(), "layout-"+l.SavedAt.Format("20060102-150405")+".json")
+	if err := writeLayout(path, l); err != nil {
+		return "", err
+	}
+	pruneSnapshots(keep)
+	return path, nil
+}
+
 func saveCmd(explicit string, keep int) error {
 	if !skylight.ScreenRecordingGranted() {
 		skylight.RequestScreenRecording() // register the binary; silent, not narrated
@@ -434,34 +467,32 @@ func saveCmd(explicit string, keep int) error {
 			`window titles are limited to the active space, weakening cross-space matching. `+
 			`See the README "Screen Recording" section.`)
 	}
-	s, err := gather()
-	if err != nil {
-		return err
-	}
-	l := buildLayout(s)
-
 	if explicit != "" {
+		s, err := gather()
+		if err != nil {
+			return err
+		}
+		l := buildLayout(s)
 		if err := writeLayout(explicit, l); err != nil {
 			return err
 		}
 		fmt.Printf("saved %d windows to %s\n", len(l.Windows), explicit)
 		return nil
 	}
-
-	refs, _ := listSnapshots()
-	if n := newestSnap(refs); n != nil && n.l.Signature() == l.Signature() {
+	path, err := saveSnapshot(keep)
+	if err != nil {
+		return err
+	}
+	if path == "" {
 		fmt.Println("unchanged since the last snapshot; nothing saved")
 		return nil
 	}
-	path := filepath.Join(snapshotsDir(), "layout-"+l.SavedAt.Format("20060102-150405")+".json")
-	if err := writeLayout(path, l); err != nil {
+	l, err := loadLayout(path)
+	if err != nil {
 		return err
 	}
 	st := l.Stats()
 	fmt.Printf("snapshot %s: %d windows, %s\n", filepath.Base(path), st.Windows, displaySummary(st))
-	if pruned := pruneSnapshots(keep); pruned > 0 {
-		fmt.Printf("pruned %d old snapshot(s) (kept newest %d + high-water)\n", pruned, keep)
-	}
 	return nil
 }
 
