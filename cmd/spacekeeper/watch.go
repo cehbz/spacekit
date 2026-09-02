@@ -19,6 +19,10 @@ const (
 	spaceQuiet    = 3 * time.Second
 	launchDelay   = 1500 * time.Millisecond
 	sweepInterval = 15 * time.Second
+	// quietExit ends login convergence once nothing has happened for this
+	// long (no launch, no new match): the login storm is over. The cap is a
+	// backstop, not a tuning knob.
+	quietExit = 2 * time.Minute
 )
 
 type watchOptions struct {

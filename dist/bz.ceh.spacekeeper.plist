@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The spacekeeper agent: `spacekeeper watch`, resident for the whole session.
+
+  It snapshots the layout every 3 minutes and on screen/system sleep and
+  space changes; after a transient display drop (a monitor that de-registers
+  for a second at wake, which scatters windows some apps fail to bring back)
+  it restores from the last pre-drop snapshot; and at login it restores the
+  layout as of the last shutdown, converging as apps reopen.
+
+  Install/remove via `make agent-install` / `make agent-uninstall`.
+  Grant Accessibility and Screen Recording to spacekeeper.
+  Log: ~/Library/Logs/spacekeeper/watch.log
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>bz.ceh.spacekeeper</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>mkdir -p "$HOME/Library/Logs/spacekeeper" &amp;&amp; exec "$HOME/bin/spacekeeper" watch >>"$HOME/Library/Logs/spacekeeper/watch.log" 2>&amp;1</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+</dict>
+</plist>

@@ -20,10 +20,9 @@ import (
 
 	"github.com/cehbz/spacekit/internal/layout"
 	"github.com/cehbz/spacekit/internal/skylight"
-	"github.com/cehbz/spacekit/internal/sysevents"
 )
 
-// The AppKit run loop used by -converge must own the main OS thread.
+// The AppKit run loop used by watch must own the main OS thread.
 func init() { runtime.LockOSThread() }
 
 func usage() {
@@ -50,7 +49,6 @@ flags (after the command):
   -frames   restore: also restore each window's position and size (needs Accessibility)
   -create   restore: recreate missing desktops via Mission Control, default on (-create=false to skip)
   -fullscreen  restore: re-fullscreen windows that were fullscreen when saved
-  -converge D  restore: keep reconciling as apps launch, up to D (quiet-exit after 2m idle; login agent uses 10m)
   -interval D  watch: periodic save interval (default 3m)
   -boot        watch: run login convergence even if uptime exceeds -settled
   -boot-cap D  watch: hard cap on login convergence (default 10m)
@@ -74,7 +72,6 @@ func main() {
 	frames := fs.Bool("frames", false, "also restore window position/size, not just space")
 	create := fs.Bool("create", true, "recreate missing spaces via Mission Control (flashy)")
 	fullscreen := fs.Bool("fullscreen", false, "re-fullscreen windows that were fullscreen at save time")
-	converge := fs.Duration("converge", 0, "keep reconciling as apps launch, up to this long")
 	interval := fs.Duration("interval", 3*time.Minute, "watch: periodic save interval")
 	forceBoot := fs.Bool("boot", false, "watch: run login convergence regardless of uptime")
 	bootCap := fs.Duration("boot-cap", 10*time.Minute, "watch: hard cap on login convergence")
@@ -85,7 +82,7 @@ func main() {
 	case "save":
 		err = saveCmd(*file, *keep)
 	case "restore":
-		err = restoreCmd(*file, *from, *latest, *highWater, *settled, *dryRun, *frames, *create, *fullscreen, *converge)
+		err = restoreCmd(*file, *from, *latest, *highWater, *settled, *dryRun, *frames, *create, *fullscreen)
 	case "list":
 		err = listCmd()
 	case "show":
@@ -496,7 +493,7 @@ func saveCmd(explicit string, keep int) error {
 	return nil
 }
 
-func restoreCmd(explicit, from string, latest, highWater bool, settle time.Duration, dryRun, frames, create, fullscreen bool, converge time.Duration) error {
+func restoreCmd(explicit, from string, latest, highWater bool, settle time.Duration, dryRun, frames, create, fullscreen bool) error {
 	l, path, err := resolveSnapshot(explicit, from, latest, highWater, settle)
 	if err != nil {
 		return err
@@ -515,95 +512,7 @@ func restoreCmd(explicit, from string, latest, highWater bool, settle time.Durat
 	st := l.Stats()
 	fmt.Printf("restoring %s snapshot %s (saved %s): %d windows, %s\n",
 		which, filepath.Base(path), l.SavedAt.Format("2006-01-02 15:04"), st.Windows, displaySummary(st))
-	if converge > 0 && !dryRun {
-		return convergeRestore(l, frames, create, fullscreen, converge)
-	}
 	return restoreLayout(l, dryRun, frames, create, fullscreen)
-}
-
-// convergeRestore runs an immediate pass, then keeps reconciling: a pass
-// ~1.5s after each app launch (windows map in shortly after the process
-// starts) and a 15s safety tick for apps that launched before the observer
-// or map windows late. Handled windows are never re-acted on. It stops when
-// every saved window is handled, when nothing has happened for quietExit
-// (no launch event, no new match — the login storm is over), or at the hard
-// cap. The cap is a backstop, not a tuning knob: quiet-exit ends the common
-// case.
-const quietExit = 2 * time.Minute
-
-func convergeRestore(l layout.Layout, frames, create, fullscreen bool, window time.Duration) error {
-	r := newReconciler(l, frames, fullscreen)
-	pass := func(create bool) (bool, error) {
-		done, st, err := r.pass(create)
-		if err != nil {
-			return false, err
-		}
-		if st.matched > 0 {
-			fmt.Printf("converge: +%d matched (%d moved, %d in place), %s total\n",
-				st.matched, st.moved, st.inPlace, r.progress())
-		}
-		return done, nil
-	}
-
-	done, err := pass(create)
-	if err != nil || done {
-		fmt.Printf("converged: %s saved windows handled\n", r.progress())
-		return err
-	}
-
-	sysevents.Start()
-	finished := make(chan error, 1)
-	go func() {
-		defer sysevents.Stop()
-		deadline := time.After(window)
-		tick := time.NewTicker(15 * time.Second)
-		defer tick.Stop()
-		lastActivity := time.Now()
-		for {
-			select {
-			case e := <-sysevents.Events():
-				if e.Kind != sysevents.AppLaunched {
-					continue
-				}
-				lastActivity = time.Now()
-				time.Sleep(1500 * time.Millisecond) // let the app map its windows
-				before := len(r.handled)
-				done, err := pass(false)
-				if len(r.handled) > before {
-					lastActivity = time.Now()
-				}
-				if err != nil || done {
-					if e.Name != "" && done {
-						fmt.Printf("converge: complete after %s launched\n", e.Name)
-					}
-					finished <- err
-					return
-				}
-			case <-tick.C:
-				before := len(r.handled)
-				done, err := pass(false)
-				if len(r.handled) > before {
-					lastActivity = time.Now()
-				}
-				if err != nil || done {
-					finished <- err
-					return
-				}
-				if time.Since(lastActivity) > quietExit {
-					fmt.Printf("converge: quiet for %s, stopping\n", quietExit)
-					finished <- nil
-					return
-				}
-			case <-deadline:
-				finished <- nil
-				return
-			}
-		}
-	}()
-	sysevents.Run() // blocks the main thread pumping AppKit notifications
-	err = <-finished
-	fmt.Printf("converged: %s saved windows handled\n", r.progress())
-	return err
 }
 
 func restoreLayout(l layout.Layout, dryRun, frames, create, fullscreen bool) error {
