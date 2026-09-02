@@ -156,3 +156,41 @@ func TestSignatureDistinguishesContent(t *testing.T) {
 		t.Fatal("different space assignment should change the signature")
 	}
 }
+
+func TestLatestBeforePicksNewestStrictlyBefore(t *testing.T) {
+	base := time.Date(2026, 9, 2, 10, 46, 0, 0, time.UTC)
+	ls := []Layout{
+		{SavedAt: base.Add(5 * time.Minute)},
+		{SavedAt: base.Add(-1 * time.Minute)},
+		{SavedAt: base.Add(-9 * time.Minute)},
+	}
+	if got := LatestBefore(ls, base); got != 1 {
+		t.Fatalf("LatestBefore = %d, want 1", got)
+	}
+}
+
+func TestLatestBeforeExcludesEqualAndEmpty(t *testing.T) {
+	base := time.Date(2026, 9, 2, 10, 46, 0, 0, time.UTC)
+	if got := LatestBefore([]Layout{{SavedAt: base}}, base); got != -1 {
+		t.Fatalf("equal timestamp: got %d, want -1", got)
+	}
+	if got := LatestBefore(nil, base); got != -1 {
+		t.Fatalf("empty: got %d, want -1", got)
+	}
+}
+
+func TestSameDisplaysIgnoresOrderAndCatchesChanges(t *testing.T) {
+	a := Stats{Displays: []DisplaySpaces{{"D1", 5}, {"D2", 1}}}
+	b := Stats{Displays: []DisplaySpaces{{"D2", 1}, {"D1", 5}}}
+	fewer := Stats{Displays: []DisplaySpaces{{"D1", 5}}}
+	count := Stats{Displays: []DisplaySpaces{{"D1", 4}, {"D2", 1}}}
+	if !a.SameDisplays(b) {
+		t.Fatal("order should not matter")
+	}
+	if a.SameDisplays(fewer) {
+		t.Fatal("missing display should differ")
+	}
+	if a.SameDisplays(count) {
+		t.Fatal("desktop count change should differ")
+	}
+}

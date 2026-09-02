@@ -118,6 +118,41 @@ func DefaultRestoreIndex(ls []Layout, boot time.Time, settle time.Duration) int 
 	return best
 }
 
+// LatestBefore returns the index of the newest layout saved strictly before
+// t, or -1. Used to pick the reference for a post-reconfiguration restore:
+// the last snapshot from before the displays started changing.
+func LatestBefore(ls []Layout, t time.Time) int {
+	best := -1
+	for i, l := range ls {
+		if !l.SavedAt.Before(t) {
+			continue
+		}
+		if best == -1 || l.SavedAt.After(ls[best].SavedAt) {
+			best = i
+		}
+	}
+	return best
+}
+
+// SameDisplays reports whether both stats describe the same displays with the
+// same number of desktops each, regardless of order. A transient display drop
+// ends in the same topology it started from; anything else is not one.
+func (s Stats) SameDisplays(o Stats) bool {
+	if len(s.Displays) != len(o.Displays) {
+		return false
+	}
+	counts := make(map[string]int, len(s.Displays))
+	for _, d := range s.Displays {
+		counts[d.DisplayUUID] = d.Spaces
+	}
+	for _, d := range o.Displays {
+		if n, ok := counts[d.DisplayUUID]; !ok || n != d.Spaces {
+			return false
+		}
+	}
+	return true
+}
+
 // Signature is a stable fingerprint of a layout's content (spaces and windows,
 // ignoring the timestamp), used to skip saving snapshots identical to the
 // previous one. Order-independent: equal arrangements produce equal signatures.
