@@ -194,3 +194,18 @@ func TestSameDisplaysIgnoresOrderAndCatchesChanges(t *testing.T) {
 		t.Fatal("desktop count change should differ")
 	}
 }
+
+func TestHighWaterIndexPicksRichest(t *testing.T) {
+	base := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+	two := []SavedSpace{{UUID: "a", DisplayUUID: "D1"}, {UUID: "b", DisplayUUID: "D2"}}
+	ls := []Layout{
+		{SavedAt: base.Add(time.Hour), Spaces: two[:1], Windows: make([]SavedWindow, 40)},
+		{SavedAt: base, Spaces: two, Windows: make([]SavedWindow, 30)},
+	}
+	if got := HighWaterIndex(ls); got != 1 {
+		t.Fatalf("HighWaterIndex = %d, want 1 (two displays beat more windows)", got)
+	}
+	if got := HighWaterIndex(nil); got != -1 {
+		t.Fatalf("empty: got %d, want -1", got)
+	}
+}

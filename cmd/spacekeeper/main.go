@@ -80,7 +80,7 @@ func main() {
 	var err error
 	switch cmd {
 	case "save":
-		err = saveCmd(*file, *keep)
+		err = saveCmd(*file, *keep, *settled)
 	case "restore":
 		err = restoreCmd(*file, *from, *latest, *highWater, *settled, *dryRun, *frames, *create, *fullscreen)
 	case "list":
@@ -170,31 +170,40 @@ func newestSnap(refs []snapRef) *snapRef {
 	return &refs[0]
 }
 
-// highWaterSnap is the richest retained snapshot (see layout.Richer).
-func highWaterSnap(refs []snapRef) *snapRef {
-	if len(refs) == 0 {
-		return nil
+func layouts(refs []snapRef) []layout.Layout {
+	ls := make([]layout.Layout, len(refs))
+	for i, r := range refs {
+		ls[i] = r.l
 	}
-	best := &refs[0]
-	for i := 1; i < len(refs); i++ {
-		if layout.Richer(refs[i].l, best.l) {
-			best = &refs[i]
-		}
-	}
-	return best
+	return ls
 }
 
-// pruneSnapshots keeps the newest `keep` snapshots plus the high-water one,
-// deleting the rest. Returns the number removed.
-func pruneSnapshots(keep int) int {
+// highWaterSnap is the richest retained snapshot (see layout.Richer).
+func highWaterSnap(refs []snapRef) *snapRef {
+	if i := layout.HighWaterIndex(layouts(refs)); i >= 0 {
+		return &refs[i]
+	}
+	return nil
+}
+
+// pruneSnapshots keeps the newest `keep` snapshots plus two pinned ones: the
+// high-water arrangement and the snapshot restore would pick by default (the
+// layout as of the last shutdown). Without the second pin, a few days of
+// interval saves push every previous-boot snapshot out, and a bare `restore`
+// would fall through to the high-water snapshot from weeks earlier.
+func pruneSnapshots(keep int, settle time.Duration) int {
 	refs, err := listSnapshots()
 	if err != nil || len(refs) <= keep {
 		return 0
 	}
-	hw := highWaterSnap(refs)
+	ls := layouts(refs)
+	pinned := map[int]bool{
+		layout.HighWaterIndex(ls):                          true,
+		layout.DefaultRestoreIndex(ls, bootTime(), settle): true,
+	}
 	deleted := 0
 	for i, r := range refs {
-		if i < keep || (hw != nil && r.path == hw.path) {
+		if i < keep || pinned[i] {
 			continue
 		}
 		if os.Remove(r.path) == nil {
@@ -253,11 +262,7 @@ func resolveSnapshot(explicit, from string, latest, highWater bool, settle time.
 		hw := highWaterSnap(refs)
 		return hw.l, hw.path, nil
 	}
-	ls := make([]layout.Layout, len(refs))
-	for i, r := range refs {
-		ls[i] = r.l
-	}
-	i := layout.DefaultRestoreIndex(ls, bootTime(), settle)
+	i := layout.DefaultRestoreIndex(layouts(refs), bootTime(), settle)
 	return refs[i].l, refs[i].path, nil
 }
 
@@ -439,7 +444,7 @@ func buildLayout(s *snapshot) layout.Layout {
 
 // saveSnapshot writes the current layout into history unless it is identical
 // to the newest snapshot. It returns the written path, or "" when unchanged.
-func saveSnapshot(keep int) (string, error) {
+func saveSnapshot(keep int, settle time.Duration) (string, error) {
 	s, err := gather()
 	if err != nil {
 		return "", err
@@ -453,11 +458,11 @@ func saveSnapshot(keep int) (string, error) {
 	if err := writeLayout(path, l); err != nil {
 		return "", err
 	}
-	pruneSnapshots(keep)
+	pruneSnapshots(keep, settle)
 	return path, nil
 }
 
-func saveCmd(explicit string, keep int) error {
+func saveCmd(explicit string, keep int, settle time.Duration) error {
 	if !skylight.ScreenRecordingGranted() {
 		skylight.RequestScreenRecording() // register the binary; silent, not narrated
 		fmt.Fprintln(os.Stderr, `note: Screen Recording is unavailable to this process; `+
@@ -476,7 +481,7 @@ func saveCmd(explicit string, keep int) error {
 		fmt.Printf("saved %d windows to %s\n", len(l.Windows), explicit)
 		return nil
 	}
-	path, err := saveSnapshot(keep)
+	path, err := saveSnapshot(keep, settle)
 	if err != nil {
 		return err
 	}

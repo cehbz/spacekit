@@ -120,7 +120,7 @@ func (w *watcher) save(reason string) {
 	}
 	var path string
 	var err error
-	sysevents.OnMain(func() { path, err = saveSnapshot(w.opt.keep) })
+	sysevents.OnMain(func() { path, err = saveSnapshot(w.opt.keep, w.opt.settle) })
 	switch {
 	case err != nil:
 		log.Printf("save (%s) failed: %v", reason, err)
@@ -171,11 +171,7 @@ func (w *watcher) displaysSettled() {
 		log.Printf("displays settled; cannot read history: %v", err)
 		return
 	}
-	ls := make([]layout.Layout, len(refs))
-	for i, r := range refs {
-		ls[i] = r.l
-	}
-	i := layout.LatestBefore(ls, start)
+	i := layout.LatestBefore(layouts(refs), start)
 	if i < 0 {
 		log.Printf("displays settled; no snapshot predates the reconfiguration")
 		return

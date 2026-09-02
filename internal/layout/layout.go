@@ -90,6 +90,18 @@ func Richer(a, b Layout) bool {
 	return a.SavedAt.After(b.SavedAt)
 }
 
+// HighWaterIndex is the richest layout by Richer, -1 when ls is empty. It is
+// pinned by pruning so a collapse never deletes the best arrangement.
+func HighWaterIndex(ls []Layout) int {
+	best := -1
+	for i := range ls {
+		if best == -1 || Richer(ls[i], ls[best]) {
+			best = i
+		}
+	}
+	return best
+}
+
 // DefaultRestoreIndex picks the snapshot restore should use by default: the
 // newest snapshot saved in a previous boot session after that session had
 // settled (uptime at save >= settle). Post-boot scrambles — snapshots taken
