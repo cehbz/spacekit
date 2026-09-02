@@ -100,8 +100,8 @@ spacekeeper restore -high-water   restore the richest retained snapshot
 spacekeeper restore -frames   also restore each window's position and size
 spacekeeper restore -create=false   skip recreating missing desktops
 spacekeeper restore -fullscreen   also re-fullscreen windows that were fullscreen
-spacekeeper restore -converge 10m  keep reconciling as apps launch (quiet-exit after 2m idle)
 spacekeeper show [-from ID]   print a snapshot's raw layout
+spacekeeper watch             run resident (the launchd agent): saves, wake restore, login convergence
 ```
 
 ### Snapshot history
@@ -110,11 +110,17 @@ spacekeeper show [-from ID]   print a snapshot's raw layout
 
 `restore` defaults to the newest **settled previous-boot snapshot** — the layout as it was at the last shutdown. Snapshots taken shortly after a boot (uptime at save below `-settled`, default 10m) are skipped, so a login-time snapshot of the not-yet-reopened session — or a whole cycle of quick reboots — never becomes the thing that gets restored. `-high-water` selects the richest retained arrangement instead (ranked by display count, then window count, then recency); the richest snapshot is still pinned so pruning never deletes it. If the default pick looks wrong, `list` shows every snapshot with descriptive facts and boot tags (`[this-boot]`, `[unsettled]`) so you choose, and `restore -from <id>` or `-latest` overrides.
 
-Run `save` periodically with the opt-in agent (`make save-agent-install`), so a good layout is always captured minutes before any reboot or outage. The agent also snapshots right after login (RunAtLoad), before apps have reopened — that early capture is tagged `[this-boot]`/`[unsettled]` in `list` and skipped by restore's default selection, so it pollutes nothing.
-
 `-frames` repositions and resizes via the Accessibility API. It only affects windows on the **currently active space** — macOS won't let AX resize a window that lives on another space, so frame restore is partial unless you run it per-space. Space assignment (the default) has no such limit. Grant the running process Accessibility for `-frames` to do anything.
 
-Restore at login is available as an opt-in agent (`make restore-agent-install` / `restore-agent-uninstall`); it restores immediately and then converges — each app-launch notification (plus a periodic sweep) triggers another matching pass over the still-unhandled saved windows, so windows land as their apps finish reopening. It stops when everything is placed, after two quiet minutes with no launches and no new matches, or at a 10-minute hard cap. Windows already handled are never touched again, so rearranging by hand during convergence is safe. See `dist/bz.ceh.spacekeeper-restore.plist`.
+### The agent
+
+`make agent-install` runs `spacekeeper watch` as a launchd agent (`bz.ceh.spacekeeper`, KeepAlive) that owns the whole lifecycle:
+
+- **Saves** every 3 minutes, on screen and system sleep, and 3 seconds after an active-space change. Saves are deduped, so a quiet session writes nothing.
+- **Restores after a transient display drop.** On Apple Silicon an external display de-registers for about a second whenever the screens wake, and macOS asks each app to bring its windows back; Chrome misses that request often enough that some of its windows land on the built-in display (WindowServer logs them as "likely misplaced"). The agent holds saves while the display configuration is changing, waits 10 seconds after the last change, and if the display set matches the newest pre-change snapshot, restores from it. Space and frame both come back. A display that is really unplugged does not match, and nothing is touched.
+- **Converges at login.** When uptime is below `-settled`, it restores the newest settled previous-boot snapshot and keeps reconciling as apps launch (a pass 1.5 s after each launch plus a 15 s sweep) until every saved window is handled, two quiet minutes pass, or the 10-minute cap. Windows already handled are never touched again, so rearranging by hand during convergence is safe. `spacekeeper watch -boot` forces this for testing.
+
+Log: `~/Library/Logs/spacekeeper/watch.log`. `make agent-uninstall` removes it. The earlier separate save and restore agents are unloaded by `agent-install`.
 
 The read side is SkyLight introspection (`SLSCopyManagedDisplaySpaces`, `SLSCopySpacesForWindows`), callable from any process. The write side is `SLSBridgedMoveWindowsToManagedSpaceOperation`, the bridged operation that works with SIP enabled since macOS 26.4. It is private and may vanish in any update; spacekeeper resolves it at runtime and reports clearly when it is unavailable. Verified working on macOS 26.5.
 
@@ -132,7 +138,7 @@ Cross-space window titles come from `kCGWindowName`, which needs Screen Recordin
 
 `save` prints a one-line note when the Screen Recording check returns false. Whether that matters depends on how `save` runs, because macOS attributes the check to the **responsible process**, not necessarily to the binary:
 
-- **Under the launchd agents** (`save`/`restore`), spacekeeper is its own responsible process and TCC subject, so grant Screen Recording to spacekeeper itself. This is the path that matters for restore quality, and it works.
+- **Under the launchd agent** (`watch`), spacekeeper is its own responsible process and TCC subject, so grant Screen Recording to spacekeeper itself. This is the path that matters for restore quality, and it works.
 - **Run by hand from a terminal**, the responsible process is the terminal or shell, not spacekeeper — so the note can appear even when spacekeeper is granted. Either grant Screen Recording to the terminal app, or ignore the note and rely on the agent.
 
 Grant under System Settings → Privacy & Security → Screen & System Audio Recording. As with Accessibility, changing the signing certificate orphans the grant — remove the stale row and re-grant.
