@@ -165,6 +165,23 @@ func (s Stats) SameDisplays(o Stats) bool {
 	return true
 }
 
+// FirstStartOfBoot reports whether no layout has been saved in the current
+// boot session, i.e. the agent is starting for the first time since boot and
+// login convergence is due. Uptime is not a usable signal: an OS upgrade or a
+// slow login can start the agent well after boot. A zero boot time means the
+// session is unknown, so no claim is made.
+func FirstStartOfBoot(ls []Layout, boot time.Time) bool {
+	if boot.IsZero() {
+		return false
+	}
+	for _, l := range ls {
+		if !l.SavedAt.Before(boot) {
+			return false
+		}
+	}
+	return true
+}
+
 // Signature is a stable fingerprint of a layout's content (spaces and windows,
 // ignoring the timestamp), used to skip saving snapshots identical to the
 // previous one. Order-independent: equal arrangements produce equal signatures.

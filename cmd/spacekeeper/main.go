@@ -50,7 +50,7 @@ flags (after the command):
   -create   restore: recreate missing desktops via Mission Control, default on (-create=false to skip)
   -fullscreen  restore: re-fullscreen windows that were fullscreen when saved
   -interval D  watch: periodic save interval (default 3m)
-  -boot        watch: run login convergence even if uptime exceeds -settled
+  -boot        watch: run login convergence even if this boot already has snapshots
   -boot-cap D  watch: hard cap on login convergence (default 10m)
 `)
 	os.Exit(2)
@@ -73,7 +73,7 @@ func main() {
 	create := fs.Bool("create", true, "recreate missing spaces via Mission Control (flashy)")
 	fullscreen := fs.Bool("fullscreen", false, "re-fullscreen windows that were fullscreen at save time")
 	interval := fs.Duration("interval", 3*time.Minute, "watch: periodic save interval")
-	forceBoot := fs.Bool("boot", false, "watch: run login convergence regardless of uptime")
+	forceBoot := fs.Bool("boot", false, "watch: run login convergence even if this boot already has snapshots")
 	bootCap := fs.Duration("boot-cap", 10*time.Minute, "watch: hard cap on login convergence")
 	fs.Parse(os.Args[2:])
 

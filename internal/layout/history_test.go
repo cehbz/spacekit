@@ -209,3 +209,21 @@ func TestHighWaterIndexPicksRichest(t *testing.T) {
 		t.Fatalf("empty: got %d, want -1", got)
 	}
 }
+
+func TestFirstStartOfBoot(t *testing.T) {
+	boot := time.Date(2026, 9, 29, 10, 36, 26, 0, time.UTC)
+	before := []Layout{{SavedAt: boot.Add(-8 * time.Minute)}, {SavedAt: boot.Add(-time.Hour)}}
+	if !FirstStartOfBoot(before, boot) {
+		t.Fatal("only pre-boot snapshots: this is the first start of the boot")
+	}
+	if !FirstStartOfBoot(nil, boot) {
+		t.Fatal("no snapshots at all: still the first start")
+	}
+	after := append(before, Layout{SavedAt: boot.Add(11 * time.Minute)})
+	if FirstStartOfBoot(after, boot) {
+		t.Fatal("a snapshot from this boot means the agent already ran")
+	}
+	if FirstStartOfBoot(before, time.Time{}) {
+		t.Fatal("unknown boot time: cannot claim a first start")
+	}
+}

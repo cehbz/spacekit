@@ -15,6 +15,7 @@ enum {
 	kSystemWillSleep,
 	kSystemWake,
 	kSpaceChanged,
+	kWillPowerOff,
 };
 
 static void observe(NSNotificationName name, int kind) {
@@ -50,6 +51,7 @@ void sysevents_start(void) {
 	observe(NSWorkspaceWillSleepNotification, kSystemWillSleep);
 	observe(NSWorkspaceDidWakeNotification, kSystemWake);
 	observe(NSWorkspaceActiveSpaceDidChangeNotification, kSpaceChanged);
+	observe(NSWorkspaceWillPowerOffNotification, kWillPowerOff);
 	CGDisplayRegisterReconfigurationCallback(displayChanged, NULL);
 }
 

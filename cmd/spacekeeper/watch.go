@@ -43,6 +43,11 @@ type watcher struct {
 
 	boot                      *reconciler // non-nil while login convergence runs
 	bootStarted, bootActivity time.Time
+
+	// poweringOff is set by the power-off notification: the layout was saved
+	// at that moment and every later save is held, so the half-quit state of
+	// a logout in progress never enters history.
+	poweringOff bool
 }
 
 func watchCmd(o watchOptions) error {
@@ -99,6 +104,10 @@ func (w *watcher) handle(e sysevents.Event) {
 		}
 	case sysevents.ScreensSleep, sysevents.SystemWillSleep:
 		w.save(e.Kind.String())
+	case sysevents.WillPowerOff:
+		w.save(e.Kind.String())
+		w.poweringOff = true
+		log.Printf("holding saves until exit")
 	case sysevents.SpaceChanged:
 		w.spaces.Note(e.At)
 	case sysevents.AppLaunched:
@@ -114,6 +123,9 @@ func (w *watcher) handle(e sysevents.Event) {
 // --- saving ---
 
 func (w *watcher) save(reason string) {
+	if w.poweringOff {
+		return
+	}
 	if w.displays.Open() {
 		log.Printf("save (%s) held: display reconfiguration in progress", reason)
 		return
@@ -204,9 +216,16 @@ func (w *watcher) displaysSettled() {
 // --- login convergence ---
 
 func (w *watcher) startBoot() {
-	boot := bootTime()
-	if !w.opt.forceBoot && (boot.IsZero() || time.Since(boot) > w.opt.settle) {
-		return
+	if !w.opt.forceBoot {
+		refs, err := listSnapshots()
+		if err != nil {
+			log.Printf("login convergence skipped: cannot read history: %v", err)
+			return
+		}
+		if !layout.FirstStartOfBoot(layouts(refs), bootTime()) {
+			log.Printf("login convergence skipped: this boot already has snapshots")
+			return
+		}
 	}
 	l, path, err := resolveSnapshot("", "", false, false, w.opt.settle)
 	if err != nil {
