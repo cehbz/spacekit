@@ -62,13 +62,16 @@ int sk_set_window_frame(int pid, uint32_t wid, double x, double y, double w, dou
 		CGSize size = CGSizeMake(w, h);
 		AXValueRef posVal = AXValueCreate(kAXValueCGPointType, &pos);
 		AXValueRef sizeVal = AXValueCreate(kAXValueCGSizeType, &size);
-		// Set size first, then position: some apps clamp position against the
-		// old size otherwise.
+		// Position first: a window near the bottom of a display has its
+		// height clamped to the remaining screen if the size lands first
+		// (observed: y=517 clamped 1410 to 923). Then size, then position
+		// again for apps that shift the origin when resizing.
+		AXError e0 = AXUIElementSetAttributeValue(win, kAXPositionAttribute, posVal);
 		AXError e1 = AXUIElementSetAttributeValue(win, kAXSizeAttribute, sizeVal);
 		AXError e2 = AXUIElementSetAttributeValue(win, kAXPositionAttribute, posVal);
 		CFRelease(posVal);
 		CFRelease(sizeVal);
-		rc = (e1 == kAXErrorSuccess && e2 == kAXErrorSuccess) ? 0 : 3;
+		rc = (e0 == kAXErrorSuccess && e1 == kAXErrorSuccess && e2 == kAXErrorSuccess) ? 0 : 3;
 		break;
 	}
 
