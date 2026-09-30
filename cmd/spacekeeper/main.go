@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -37,6 +38,8 @@ commands:
   show      print a snapshot's raw layout
   watch     run resident: periodic and event-driven saves, restore after a
             transient display drop, and login convergence (the launchd agent)
+  inspect   print every recorded window with its space, CGWindow bounds, and
+            the frame its app reports via Accessibility (needs Accessibility)
 
 flags (after the command):
   -f path   use an explicit file instead of the snapshot history
@@ -87,6 +90,8 @@ func main() {
 		err = listCmd()
 	case "show":
 		err = showCmd(*file, *from, *latest, *highWater, *settled)
+	case "inspect":
+		err = inspectCmd()
 	case "watch":
 		err = watchCmd(watchOptions{
 			interval: *interval, settle: *settled, bootCap: *bootCap, forceBoot: *forceBoot,
@@ -422,6 +427,35 @@ func gather() (*snapshot, error) {
 		})
 	}
 	return s, nil
+}
+
+// inspectCmd is a diagnostic: for each window, the space it is on, its
+// CGWindow bounds, and the frame its app reports through Accessibility.
+// "MISMATCH" marks a window whose app disagrees with the window server
+// about where it is, the state a window can be left in after a display drop.
+func inspectCmd() error {
+	s, err := gather()
+	if err != nil {
+		return err
+	}
+	for _, w := range s.windows {
+		space := s.idToKey[s.winSpace[w.ID]]
+		if d, ok := s.fsWindow[w.ID]; ok {
+			space = "fullscreen@" + shortUUID(d)
+		}
+		f := w.Frame
+		line := fmt.Sprintf("%-6d %-16.16s %-36.36s %-8.8s cg=%.0f,%.0f %.0fx%.0f", w.ID, w.OwnerName, w.Title, space, f.X, f.Y, f.W, f.H)
+		if x, y, aw, ah, ok := skylight.WindowAXFrame(w.OwnerPID, w.ID); ok {
+			line += fmt.Sprintf(" ax=%.0f,%.0f %.0fx%.0f", x, y, aw, ah)
+			if math.Abs(x-f.X) > 2 || math.Abs(y-f.Y) > 2 || math.Abs(aw-f.W) > 2 || math.Abs(ah-f.H) > 2 {
+				line += " MISMATCH"
+			}
+		} else {
+			line += " ax=-"
+		}
+		fmt.Println(line)
+	}
+	return nil
 }
 
 // buildLayout turns a gathered snapshot into a saveable layout.

@@ -92,6 +92,7 @@ static CFDataRef sk_window_list(void) {
 int sk_move_windows_to_space(const uint32_t *wids, int count, unsigned long long sid);
 char *sk_bundle_id_for_pid(int pid);
 // Implemented in ax.m.
+int sk_window_ax_frame(int pid, uint32_t wid, double *x, double *y, double *w, double *h);
 int sk_set_window_frame(int pid, uint32_t wid, double x, double y, double w, double h);
 int sk_set_fullscreen(int pid, uint32_t wid, int on);
 CFDataRef sk_window_titles(int pid);
@@ -291,6 +292,16 @@ func SetWindowFrame(pid int, wid uint32, x, y, w, h float64) error {
 	default:
 		return fmt.Errorf("set-frame failed (rc=%d)", int(rc))
 	}
+}
+
+// WindowAXFrame reads a window's frame as its app reports it through
+// Accessibility. ok is false when the app does not list the window (windows
+// on an inactive space, or an app without AX). Compared with the CGWindow
+// bounds this reveals a window whose app believes it is on another display.
+func WindowAXFrame(pid int, wid uint32) (x, y, w, h float64, ok bool) {
+	var cx, cy, cw, ch C.double
+	rc := C.sk_window_ax_frame(C.int(pid), C.uint32_t(wid), &cx, &cy, &cw, &ch)
+	return float64(cx), float64(cy), float64(cw), float64(ch), rc == 0
 }
 
 // FullscreenResult reports the outcome of a SetFullscreen call.

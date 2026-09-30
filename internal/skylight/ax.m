@@ -80,6 +80,35 @@ int sk_set_window_frame(int pid, uint32_t wid, double x, double y, double w, dou
 	return rc;
 }
 
+// Read the AX position/size of the window with the given CGWindowID. Returns
+// 0 on success, 1 if the app has no AX window list, 2 if the window is not in
+// it (typically: it is on an inactive space).
+int sk_window_ax_frame(int pid, uint32_t wid, double *x, double *y, double *w, double *h) {
+	AXUIElementRef app = AXUIElementCreateApplication(pid);
+	CFArrayRef windows = NULL;
+	if (AXUIElementCopyAttributeValue(app, kAXWindowsAttribute, (CFTypeRef *)&windows) != kAXErrorSuccess || !windows) {
+		CFRelease(app);
+		return 1;
+	}
+	int rc = 2;
+	CFIndex n = CFArrayGetCount(windows);
+	for (CFIndex i = 0; i < n; i++) {
+		AXUIElementRef win = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
+		CGWindowID got = 0;
+		if (_AXUIElementGetWindow(win, &got) != kAXErrorSuccess || got != wid) continue;
+		AXValueRef pv = NULL, sv = NULL;
+		CGPoint p = CGPointZero; CGSize s = CGSizeZero;
+		if (AXUIElementCopyAttributeValue(win, kAXPositionAttribute, (CFTypeRef *)&pv) == kAXErrorSuccess && pv) { AXValueGetValue(pv, kAXValueCGPointType, &p); CFRelease(pv); }
+		if (AXUIElementCopyAttributeValue(win, kAXSizeAttribute, (CFTypeRef *)&sv) == kAXErrorSuccess && sv) { AXValueGetValue(sv, kAXValueCGSizeType, &s); CFRelease(sv); }
+		*x = p.x; *y = p.y; *w = s.width; *h = s.height;
+		rc = 0;
+		break;
+	}
+	CFRelease(windows);
+	CFRelease(app);
+	return rc;
+}
+
 // Set (or clear) native fullscreen on the window with the given CGWindowID via
 // the AXFullScreen attribute — the same state the green button toggles, which
 // creates/removes a dedicated fullscreen space. Returns 0 if changed, 1 if AX
