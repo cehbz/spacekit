@@ -182,6 +182,24 @@ func FirstStartOfBoot(ls []Layout, boot time.Time) bool {
 	return true
 }
 
+// ReferenceFor picks the layout a settled display change should restore
+// from: the newest one saved in this boot session before the change began
+// whose display set equals the settled one. A snapshot taken during a
+// monitor outage has the wrong display set and is skipped, so a return after
+// hours restores the last layout that had that display.
+func ReferenceFor(ls []Layout, before, boot time.Time, want Stats) int {
+	best := -1
+	for i, l := range ls {
+		if !l.SavedAt.Before(before) || l.SavedAt.Before(boot) || !l.Stats().SameDisplays(want) {
+			continue
+		}
+		if best == -1 || l.SavedAt.After(ls[best].SavedAt) {
+			best = i
+		}
+	}
+	return best
+}
+
 // Signature is a stable fingerprint of a layout's content (spaces and windows,
 // ignoring the timestamp), used to skip saving snapshots identical to the
 // previous one. Order-independent: equal arrangements produce equal signatures.

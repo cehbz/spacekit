@@ -183,12 +183,6 @@ func (w *watcher) displaysSettled() {
 		log.Printf("displays settled; cannot read history: %v", err)
 		return
 	}
-	i := layout.LatestBefore(layouts(refs), start)
-	if i < 0 {
-		log.Printf("displays settled; no snapshot predates the reconfiguration")
-		return
-	}
-	ref := refs[i]
 	sysevents.OnMain(func() {
 		s, err := gather()
 		if err != nil {
@@ -196,11 +190,12 @@ func (w *watcher) displaysSettled() {
 			return
 		}
 		now := layout.Layout{Spaces: s.spaces}.Stats()
-		if !now.SameDisplays(ref.l.Stats()) {
-			log.Printf("displays settled to %s; %s had %s; not a transient drop, leaving windows alone",
-				displaySummary(now), filepath.Base(ref.path), displaySummary(ref.l.Stats()))
+		i := layout.ReferenceFor(layouts(refs), start, bootTime(), now)
+		if i < 0 {
+			log.Printf("displays settled to %s; no snapshot with that display set this boot; leaving windows alone", displaySummary(now))
 			return
 		}
+		ref := refs[i]
 		r := newReconciler(ref.l, w.opt.frames, w.opt.fullscreen)
 		_, st, err := r.passOn(s)
 		if err != nil {

@@ -227,3 +227,27 @@ func TestFirstStartOfBoot(t *testing.T) {
 		t.Fatal("unknown boot time: cannot claim a first start")
 	}
 }
+
+func TestReferenceForPicksNewestMatchingDisplaySetThisBoot(t *testing.T) {
+	boot := time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)
+	two := []SavedSpace{{UUID: "a", DisplayUUID: "D1"}, {UUID: "b", DisplayUUID: "D2"}}
+	one := []SavedSpace{{UUID: "b", DisplayUUID: "D2"}}
+	burst := boot.Add(10 * time.Hour)
+	ls := []Layout{
+		{SavedAt: boot.Add(9 * time.Hour), Spaces: one}, // during the outage
+		{SavedAt: boot.Add(6 * time.Hour), Spaces: two}, // last good, this boot
+		{SavedAt: boot.Add(5 * time.Hour), Spaces: two},
+		{SavedAt: boot.Add(-1 * time.Hour), Spaces: two}, // previous boot
+		{SavedAt: boot.Add(11 * time.Hour), Spaces: two}, // after the burst
+	}
+	want := Layout{Spaces: two}.Stats()
+	if got := ReferenceFor(ls, burst, boot, want); got != 1 {
+		t.Fatalf("ReferenceFor = %d, want 1", got)
+	}
+	if got := ReferenceFor(ls, burst, boot, Layout{Spaces: one}.Stats()); got != 0 {
+		t.Fatalf("one-display want: got %d, want 0", got)
+	}
+	if got := ReferenceFor(ls[:1], burst, boot, want); got != -1 {
+		t.Fatalf("no match: got %d, want -1", got)
+	}
+}
