@@ -67,17 +67,22 @@ func switchSpace(right, verify bool) {
 	if err := postCtrlArrow(right); err != nil {
 		fatal(err.Error())
 	}
-	if !verify {
-		return
-	}
-	// The slide animation takes a few hundred ms; poll rather than fixed-sleep.
+	// A process that exits right after CGEventPost can lose the event
+	// (observed under launchd: no switch without -verify, a switch every time
+	// with it), so wait for the space to change before returning. The slide
+	// animation takes a few hundred ms; poll rather than fixed-sleep.
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if cur := activeSpaceID(); cur != before {
-			fmt.Printf("switched: space %d -> %d\n", before, cur)
+			if verify {
+				fmt.Printf("switched: space %d -> %d\n", before, cur)
+			}
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+	if !verify {
+		return
 	}
 	fatal(fmt.Sprintf("active space did not change (still %d) — event posted but ignored, or already at the end of the space list", before))
 }
