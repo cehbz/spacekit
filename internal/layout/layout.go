@@ -248,6 +248,49 @@ type CurrentDisplay struct {
 	Spaces []CurrentSpace
 }
 
+// FrameDebt is a window whose frame macOS changed during a display drop and
+// that still needs putting back. Accessibility can only resize windows on an
+// active space, so debts are paid as the user visits each space; a window
+// the user has since moved or resized is left alone.
+type FrameDebt struct {
+	ID         uint32
+	PID        int
+	Want, Seen Rect
+}
+
+// FrameDebts lists matched windows whose live frame differs from the saved
+// one and is smaller: a display drop only shrinks or squeezes windows, so a
+// window that grew resized itself and is left alone. Untitled windows
+// (popups, find bars) are skipped; they resize on their own too.
+func FrameDebts(saved []SavedWindow, matched map[int]uint32, live []LiveWindow) []FrameDebt {
+	byID := make(map[uint32]LiveWindow, len(live))
+	for _, l := range live {
+		byID[l.ID] = l
+	}
+	var out []FrameDebt
+	for si, wid := range matched {
+		s := saved[si]
+		l, ok := byID[wid]
+		if !ok || s.Fullscreen || s.Title == "" || l.Frame == s.Frame || l.Frame.W*l.Frame.H >= s.Frame.W*s.Frame.H {
+			continue
+		}
+		out = append(out, FrameDebt{ID: wid, PID: l.OwnerPID, Want: s.Frame, Seen: l.Frame})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// Settle decides a debt against the current state of its window: pay when the
+// window is on an active space and unchanged since the debt was recorded;
+// drop when the window is gone, already shows the wanted frame, or its frame
+// changed some other way (the user moved it).
+func (d FrameDebt) Settle(live *LiveWindow, activeSpaces map[uint64]bool, spaceOf map[uint32]uint64) (pay, drop bool) {
+	if live == nil || live.Frame == d.Want || live.Frame != d.Seen {
+		return false, true
+	}
+	return activeSpaces[spaceOf[d.ID]], false
+}
+
 // OverviewOpen reports whether Mission Control's overview is showing. While
 // it is, CGWindow bounds are the scaled thumbnails, so a layout gathered
 // then is not one to keep. The overview adds WindowManager's highlight

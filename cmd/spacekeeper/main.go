@@ -328,6 +328,7 @@ type snapshot struct {
 	windows  []layout.LiveWindow
 	winSpace map[uint32]uint64 // window ID -> current space ID
 	idToKey  map[uint64]string // space ID -> spaceKey
+	current  map[uint64]bool   // each display's current space ID
 	// fsSpace maps a fullscreen/tiled (type 4) space ID to its display UUID;
 	// fsWindow maps a window living in one to that display UUID.
 	fsSpace  map[uint64]string
@@ -342,11 +343,13 @@ func gather() (*snapshot, error) {
 	s := &snapshot{
 		winSpace: make(map[uint32]uint64),
 		idToKey:  make(map[uint64]string),
+		current:  make(map[uint64]bool),
 		fsSpace:  make(map[uint64]string),
 		fsWindow: make(map[uint32]string),
 	}
 	for _, d := range displays {
 		cur := layout.CurrentDisplay{UUID: d.UUID}
+		s.current[d.CurrentSpace.ID()] = true
 		idx := 0
 		for _, sp := range d.Spaces {
 			if sp.UserSpace() {

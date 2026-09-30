@@ -5,10 +5,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cehbz/spacekit/internal/layout"
 	"github.com/cehbz/spacekit/internal/settle"
+	"github.com/cehbz/spacekit/internal/skylight"
 	"github.com/cehbz/spacekit/internal/sysevents"
 )
 
@@ -44,6 +46,10 @@ type watcher struct {
 
 	boot                      *reconciler // non-nil while login convergence runs
 	bootStarted, bootActivity time.Time
+
+	// debts are windows a display drop left at the wrong size, repaired as
+	// their spaces become active (layout.FrameDebt).
+	debts []layout.FrameDebt
 
 	// poweringOff is set by the power-off notification: the layout was saved
 	// at that moment and every later save is held, so the half-quit state of
@@ -91,6 +97,13 @@ func (w *watcher) loop() {
 			w.displaysSettled()
 		case <-spaceQuietC:
 			w.spaces.Close()
+			if len(w.debts) > 0 {
+				sysevents.OnMain(func() {
+					if s, err := gather(); err == nil {
+						w.payDebts(s)
+					}
+				})
+			}
 			w.save("space change")
 		}
 	}
@@ -207,8 +220,87 @@ func (w *watcher) displaysSettled() {
 		}
 		log.Printf("displays settled; restored from %s: matched %d, moved %d (%d verified), %d in place",
 			filepath.Base(ref.path), st.matched, st.moved, st.verified, st.inPlace)
+		w.debts = layout.FrameDebts(ref.l.Windows, layout.Match(ref.l.Windows, s.windows), s.windows)
+		if len(w.debts) > 0 {
+			log.Printf("frame debt: %d window(s) at the wrong size: %s", len(w.debts), debtNames(w.debts, s.windows))
+			if moved, err := gather(); err == nil {
+				w.payDebts(moved) // spaces just changed under the moved windows
+			}
+		}
 	})
 	w.save("after reconfiguration")
+}
+
+// debtNames lists the apps and titles behind a set of debts, for the log.
+func debtNames(debts []layout.FrameDebt, live []layout.LiveWindow) string {
+	byID := make(map[uint32]layout.LiveWindow, len(live))
+	for _, l := range live {
+		byID[l.ID] = l
+	}
+	names := make([]string, 0, len(debts))
+	for _, d := range debts {
+		l := byID[d.ID]
+		t := l.Title
+		if len(t) > 24 {
+			t = t[:24]
+		}
+		names = append(names, l.OwnerName+" | "+t)
+	}
+	return strings.Join(names, "; ")
+}
+
+// payDebts repairs the frames of debts whose windows are on an active space
+// and unchanged since the debt was recorded, and forgets debts whose windows
+// are gone or were changed by the user. Runs on the main thread.
+func (w *watcher) payDebts(s *snapshot) {
+	byID := make(map[uint32]*layout.LiveWindow, len(s.windows))
+	for i := range s.windows {
+		byID[s.windows[i].ID] = &s.windows[i]
+	}
+	var keep, attempted []layout.FrameDebt
+	dropped := 0
+	for _, d := range w.debts {
+		pay, drop := d.Settle(byID[d.ID], s.current, s.winSpace)
+		switch {
+		case drop:
+			dropped++
+		case pay:
+			if err := skylight.SetWindowFrame(d.PID, d.ID, d.Want.X, d.Want.Y, d.Want.W, d.Want.H); err != nil {
+				keep = append(keep, d)
+				continue
+			}
+			attempted = append(attempted, d)
+		default:
+			keep = append(keep, d)
+		}
+	}
+	// An AX write can return success without taking effect, so a payment
+	// counts only when the window server shows the wanted frame. A partial
+	// result keeps the debt with the new frame as its baseline.
+	paid := 0
+	if len(attempted) > 0 {
+		time.Sleep(300 * time.Millisecond) // AX resizes apply asynchronously
+		if after, err := gather(); err == nil {
+			now := make(map[uint32]layout.Rect, len(after.windows))
+			for _, l := range after.windows {
+				now[l.ID] = l.Frame
+			}
+			for _, d := range attempted {
+				if now[d.ID] == d.Want {
+					paid++
+				} else {
+					d.Seen = now[d.ID]
+					keep = append(keep, d)
+				}
+			}
+		} else {
+			keep = append(keep, attempted...)
+		}
+	}
+	w.debts = keep
+	if paid > 0 || dropped > 0 || len(attempted) > 0 {
+		log.Printf("frame debt: paid %d, dropped %d, %d outstanding", paid, dropped, len(keep))
+	}
 }
 
 // --- login convergence ---
