@@ -248,6 +248,19 @@ type CurrentDisplay struct {
 	Spaces []CurrentSpace
 }
 
+// OverviewOpen reports whether Mission Control's overview is showing. While
+// it is, CGWindow bounds are the scaled thumbnails, so a layout gathered
+// then is not one to keep. The overview adds WindowManager's highlight
+// overlay windows to the window list and nothing else does.
+func OverviewOpen(live []LiveWindow) bool {
+	for _, l := range live {
+		if l.OwnerName == "WindowManager" && l.Title == "Window Highlight Overlay" {
+			return true
+		}
+	}
+	return false
+}
+
 // Match pairs saved windows with live windows. Windows only match within the
 // same app (bundle ID, falling back to owner name). Among an app's windows,
 // equal titles are the strongest signal, then frame proximity. Each live

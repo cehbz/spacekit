@@ -251,3 +251,12 @@ func TestReferenceForPicksNewestMatchingDisplaySetThisBoot(t *testing.T) {
 		t.Fatalf("no match: got %d, want -1", got)
 	}
 }
+
+func TestOverviewOpen(t *testing.T) {
+	if OverviewOpen([]LiveWindow{{OwnerName: "Finder", Title: "Desktop"}}) {
+		t.Fatal("no overlay: closed")
+	}
+	if !OverviewOpen([]LiveWindow{{OwnerName: "WindowManager", Title: "Window Highlight Overlay"}}) {
+		t.Fatal("overlay present: open")
+	}
+}

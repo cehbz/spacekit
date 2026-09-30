@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -134,6 +135,8 @@ func (w *watcher) save(reason string) {
 	var err error
 	sysevents.OnMain(func() { path, err = saveSnapshot(w.opt.keep, w.opt.settle) })
 	switch {
+	case errors.Is(err, errOverviewOpen):
+		log.Printf("save (%s) skipped: %v", reason, err)
 	case err != nil:
 		log.Printf("save (%s) failed: %v", reason, err)
 	case path != "":

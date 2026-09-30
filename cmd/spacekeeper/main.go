@@ -442,12 +442,19 @@ func buildLayout(s *snapshot) layout.Layout {
 	return l
 }
 
+// errOverviewOpen is returned by saveSnapshot while Mission Control is
+// showing: the window list then holds thumbnail bounds, not a layout.
+var errOverviewOpen = errors.New("Mission Control is open")
+
 // saveSnapshot writes the current layout into history unless it is identical
 // to the newest snapshot. It returns the written path, or "" when unchanged.
 func saveSnapshot(keep int, settle time.Duration) (string, error) {
 	s, err := gather()
 	if err != nil {
 		return "", err
+	}
+	if layout.OverviewOpen(s.windows) {
+		return "", errOverviewOpen
 	}
 	l := buildLayout(s)
 	refs, _ := listSnapshots()
