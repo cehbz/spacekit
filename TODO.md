@@ -3,6 +3,7 @@
 ## spacekeeper
 
 - Verify the arrangement model on a real wake: `watch.log` should show `display change: N window(s) owed their placement`, `repaired` lines as spaces are visited, `released`, and no `released unrepaired`.
+- Confirm in `watch.log` that looks are put off during space switches in normal use (`put off: the screen is in motion`) and that no placement is adopted with a frame outside its display.
 - Verify relaunch binding on a Chrome quit and reopen: `watch.log` should show `relaunch: bound N of M`, repairs and releases, and the count of Chrome rows in `window` should grow only by windows with no match.
 - Slice 2b: login through the model (after a reboot every app is a restart), then remove snapshots, their commands and login convergence; add a command that moves or resizes one window by id for on-machine tests.
 - Slice 3: `log`, `undo` and `owe` commands over the journal; delete closed placement versions older than 90 days.

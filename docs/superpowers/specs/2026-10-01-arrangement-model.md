@@ -37,10 +37,15 @@ window; a missed one leaves a window where the app put it.
 
 **Look.** An observation of the live session: every minute, at each space
 change, and immediately before an announced disturbance (screen or system
-sleep, power-off).
+sleep, power-off). A look is two samples 400 ms apart that agree; if anything
+moved between them the screen is in motion and the look is put off and
+retried. During a space-switch slide the window server reports every window
+shifted sideways, and a single sample taken then reads as if every window
+had been moved.
 
 **Disturbance.** A period during which the screen is not intent: a display
-change (until quiet for 10 s), the Mission Control overview, logout, a locked
+change (until quiet for 10 s), a screen in motion (a space switch, a drag,
+any animation), the Mission Control overview, logout, a locked
 or sleeping session, and for one app's windows, that app's relaunch: from the
 first look that sees a run of the app the store does not know until a look in
 which none of that run's windows is fresh.
