@@ -142,3 +142,144 @@ func TestRecordedIsScopedToBootAndArrangement(t *testing.T) {
 		t.Fatalf("bound this boot but not placed in the other arrangement: %+v", rs)
 	}
 }
+
+func one(t *testing.T, s *Store, arr int64) arrangement.Recorded {
+	t.Helper()
+	rs, err := s.Recorded(arr, boot)
+	if err != nil || len(rs) != 1 {
+		t.Fatalf("recorded = %+v, %v", rs, err)
+	}
+	return rs[0]
+}
+
+func TestOweThenRelease(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := one(t, s, arr); !got.Owed || got.Progress != arrangement.Untried || got.Frame != full {
+		t.Fatalf("owed keeps its placement: %+v", got)
+	}
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Release, Window: r.Window, Seen: seen(42, "S1", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := one(t, s, arr); got.Owed {
+		t.Fatalf("released: %+v", got)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM event WHERE kind IN ('owed', 'released')`); n != 2 {
+		t.Fatalf("journal events = %d, want 2", n)
+	}
+}
+
+func TestRepairRecordsProgress(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	want := arrangement.Placement{Space: "S1", Frame: full}
+	ds := []arrangement.Decision{
+		{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S2", half)},
+		{Kind: arrangement.Repair, Window: r.Window, Seen: seen(42, "S2", half), Want: want, Move: true},
+	}
+	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
+		t.Fatal(err)
+	}
+	if got := one(t, s, arr); got.Progress != arrangement.Moved {
+		t.Fatalf("Progress = %v, want Moved", got.Progress)
+	}
+}
+
+func TestIdleRepairWritesNothing(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	before := count(t, s, `SELECT COUNT(*) FROM change`)
+	idle := arrangement.Decision{Kind: arrangement.Repair, Window: r.Window, Seen: seen(42, "S1", half), Want: arrangement.Placement{Space: "S1", Frame: full}}
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{idle}); err != nil {
+		t.Fatal(err)
+	}
+	if after := count(t, s, `SELECT COUNT(*) FROM change`); after != before {
+		t.Fatalf("a repair that did nothing must not write a change: %d -> %d", before, after)
+	}
+}
+
+func TestGiveUpAdoptsAndClearsOwed(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	ds := []arrangement.Decision{{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S1", half)}}
+	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.GiveUp, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
+		t.Fatal(err)
+	}
+	got := one(t, s, arr)
+	if got.Owed || got.Frame != half {
+		t.Fatalf("given up: adopted where it is and no longer owed: %+v", got)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM event WHERE kind = 'gave up'`); n != 1 {
+		t.Fatalf("gave-up events = %d", n)
+	}
+}
+
+func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	a := adoptNew(t, s, arr, 1, "S1", full)
+	adoptNew(t, s, arr, 2, "S1", full)
+	moved := []arrangement.Decision{
+		{Kind: arrangement.Owe, Window: a.Window, Seen: seen(1, "S2", half)},
+		{Kind: arrangement.Repair, Window: a.Window, Seen: seen(1, "S2", half), Want: arrangement.Placement{Space: "S1", Frame: full}, Move: true},
+	}
+	if err := s.Apply(arr, boot, t0, "look", moved); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.OweAll(arr, boot, t0, "display change")
+	if err != nil || n != 2 {
+		t.Fatalf("OweAll = %d, %v; want 2", n, err)
+	}
+	rs, _ := s.Recorded(arr, boot)
+	for _, r := range rs {
+		if !r.Owed || r.Progress != arrangement.Untried {
+			t.Fatalf("every placed window owed afresh: %+v", r)
+		}
+	}
+	if n, _ := s.OweAll(arr, boot.Add(time.Hour), t0, "display change"); n != 0 {
+		t.Fatalf("another boot has nothing bound: %d", n)
+	}
+}
+
+func TestRefreshTitles(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	sn := seen(42, "S1", full)
+	sn.Title = "renamed"
+	if err := s.RefreshTitles(boot, []arrangement.Seen{sn}); err != nil {
+		t.Fatal(err)
+	}
+	var title string
+	if err := s.db.QueryRow(`SELECT title FROM window WHERE id = ?`, r.Window).Scan(&title); err != nil || title != "renamed" {
+		t.Fatalf("title = %q, %v", title, err)
+	}
+}
+
+func TestDisturbanceLifecycle(t *testing.T) {
+	s := open(t)
+	id, err := s.BeginDisturbance("display", t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open1, _ := s.OpenDisturbances()
+	if len(open1) != 1 || open1[0].ID != id || open1[0].Kind != "display" || !open1[0].Began.Equal(t0) {
+		t.Fatalf("open = %+v", open1)
+	}
+	if err := s.EndDisturbance(id, t0.Add(10*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if open2, _ := s.OpenDisturbances(); len(open2) != 0 {
+		t.Fatalf("still open: %+v", open2)
+	}
+}

@@ -169,6 +169,34 @@ func apply(tx *sql.Tx, change, arr int64, boot, at time.Time, d arrangement.Deci
 			return err
 		}
 		return event(tx, change, win, "adopted")
+	case arrangement.Owe:
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO owed(window_id, arrangement_id, progress, since) VALUES (?, ?, 0, ?)`,
+			win, arr, change); err != nil {
+			return err
+		}
+		return event(tx, change, win, "owed")
+	case arrangement.Release:
+		if _, err := tx.Exec(`DELETE FROM owed WHERE window_id = ? AND arrangement_id = ?`, win, arr); err != nil {
+			return err
+		}
+		return event(tx, change, win, "released")
+	case arrangement.GiveUp:
+		if _, err := tx.Exec(`DELETE FROM owed WHERE window_id = ? AND arrangement_id = ?`, win, arr); err != nil {
+			return err
+		}
+		if err := place(tx, change, arr, win, d.Seen.Placement); err != nil {
+			return err
+		}
+		return event(tx, change, win, "gave up")
+	case arrangement.Repair:
+		p, ok := d.Progress()
+		if !ok {
+			return nil
+		}
+		if _, err := tx.Exec(`UPDATE owed SET progress = ? WHERE window_id = ? AND arrangement_id = ?`, int(p), win, arr); err != nil {
+			return err
+		}
+		return event(tx, change, win, "repaired")
 	}
 	return nil
 }
@@ -199,4 +227,99 @@ func place(tx *sql.Tx, change, arr, win int64, p arrangement.Placement) error {
 func event(tx *sql.Tx, change, win int64, kind string) error {
 	_, err := tx.Exec(`INSERT INTO event(change_id, window_id, kind) VALUES (?, ?, ?)`, change, win, kind)
 	return err
+}
+
+// OweAll marks every window bound in this boot that has a placement in the
+// arrangement as owed, with no repair progress. It returns how many are owed.
+func (s *Store) OweAll(arr int64, boot, at time.Time, cause string) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO change(at, cause) VALUES (?, ?)`, at.UnixMilli(), cause)
+	if err != nil {
+		return 0, err
+	}
+	change, _ := res.LastInsertId()
+	if _, err := tx.Exec(`UPDATE owed SET progress = 0 WHERE arrangement_id = ?`, arr); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`
+		INSERT OR IGNORE INTO owed(window_id, arrangement_id, progress, since)
+		SELECT p.window_id, p.arrangement_id, 0, ?1
+		FROM placement p JOIN binding b ON b.window_id = p.window_id AND b.boot = ?2
+		WHERE p.arrangement_id = ?3 AND p.closed_by IS NULL`, change, boot.Unix(), arr); err != nil {
+		return 0, err
+	}
+	var n int
+	if err := tx.QueryRow(`
+		SELECT COUNT(*) FROM owed o JOIN binding b ON b.window_id = o.window_id AND b.boot = ?1
+		WHERE o.arrangement_id = ?2`, boot.Unix(), arr).Scan(&n); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`UPDATE change SET note = ? WHERE id = ?`, fmt.Sprintf("%d windows owed", n), change); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
+// RefreshTitles records the latest title of each seen window bound in this
+// boot. A title is identity for later matching, not a placement, so this
+// writes no change.
+func (s *Store) RefreshTitles(boot time.Time, seen []arrangement.Seen) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, w := range seen {
+		if _, err := tx.Exec(`UPDATE window SET title = ?1
+			WHERE id = (SELECT window_id FROM binding WHERE boot = ?2 AND wid = ?3) AND title <> ?1`,
+			w.Title, boot.Unix(), w.Binding); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// Disturbance is a period during which the screen was not intent.
+type Disturbance struct {
+	ID    int64
+	Kind  string
+	Began time.Time
+}
+
+func (s *Store) BeginDisturbance(kind string, at time.Time) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO disturbance(kind, began) VALUES (?, ?)`, kind, at.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *Store) EndDisturbance(id int64, at time.Time) error {
+	_, err := s.db.Exec(`UPDATE disturbance SET ended = ? WHERE id = ?`, at.UnixMilli(), id)
+	return err
+}
+
+// OpenDisturbances returns disturbances with no end: after a restart, ones
+// the agent was in the middle of.
+func (s *Store) OpenDisturbances() ([]Disturbance, error) {
+	rows, err := s.db.Query(`SELECT id, kind, began FROM disturbance WHERE ended IS NULL ORDER BY began`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Disturbance
+	for rows.Next() {
+		var d Disturbance
+		var began int64
+		if err := rows.Scan(&d.ID, &d.Kind, &began); err != nil {
+			return nil, err
+		}
+		d.Began = time.UnixMilli(began)
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
