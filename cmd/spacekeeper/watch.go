@@ -23,6 +23,7 @@ import (
 const (
 	displayQuiet  = 10 * time.Second
 	spaceQuiet    = 3 * time.Second
+	stillGap      = 400 * time.Millisecond // between the two samples of a look
 	launchDelay   = 1500 * time.Millisecond
 	sweepInterval = 15 * time.Second
 	// quietExit ends login convergence once nothing has happened for this
@@ -61,6 +62,7 @@ type watcher struct {
 	ticks       int
 
 	relaunching map[int64]bool // app runs whose windows are still appearing
+	retry       string         // trigger of a look put off because the screen was moving
 
 	// poweringOff is set by the power-off notification: the layout was saved
 	// at that moment and every later save and look is held, so the half-quit
@@ -117,7 +119,11 @@ func (w *watcher) loop() {
 			w.displaysSettled()
 		case <-spaceQuietC:
 			w.spaces.Close()
-			w.look("space change")
+			trigger := "space change"
+			if w.retry != "" {
+				trigger, w.retry = w.retry, ""
+			}
+			w.look(trigger)
 			w.save("space change")
 		}
 	}
@@ -222,47 +228,82 @@ func (w *watcher) look(trigger string) {
 	if w.poweringOff || w.asleep || w.displays.Open() || w.boot != nil {
 		return
 	}
-	sysevents.OnMain(func() {
-		if err := w.lookOnMain(trigger); err != nil {
-			log.Printf("look (%s) failed: %v", trigger, err)
-		}
-	})
+	// Two samples a moment apart: a look is only taken on a still screen.
+	var first []arrangement.Seen
+	var err error
+	sysevents.OnMain(func() { first, err = sample() })
+	if err != nil {
+		log.Printf("look (%s) failed: %v", trigger, err)
+		return
+	}
+	if first == nil {
+		return
+	}
+	time.Sleep(stillGap)
+	var moving bool
+	sysevents.OnMain(func() { moving, err = w.lookOnMain(trigger, first) })
+	if err != nil {
+		log.Printf("look (%s) failed: %v", trigger, err)
+	}
+	if moving {
+		log.Printf("look (%s) put off: the screen is in motion", trigger)
+		w.retry = trigger
+		w.spaces.Note(time.Now())
+	}
 }
 
-func (w *watcher) lookOnMain(trigger string) error {
+// sample observes the session's windows, or returns nil while the overview
+// is open or the session is locked: the screen is not intent then.
+func sample() ([]arrangement.Seen, error) {
 	s, err := gather()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if layout.OverviewOpen(s.windows) || skylight.SessionLocked() {
-		return nil
+		return nil, nil
+	}
+	return seenWindows(s), nil
+}
+
+// lookOnMain takes the look unless the session moved since the first sample,
+// which it reports as moving.
+func (w *watcher) lookOnMain(trigger string, first []arrangement.Seen) (moving bool, err error) {
+	s, err := gather()
+	if err != nil {
+		return false, err
+	}
+	if layout.OverviewOpen(s.windows) || skylight.SessionLocked() {
+		return false, nil
+	}
+	seen := seenWindows(s)
+	if !arrangement.Still(first, seen) {
+		return true, nil
 	}
 	boot, now := bootTime(), time.Now()
 	arr, err := w.store.Arrangement(displaySet(s.spaces))
 	if err != nil {
-		return err
+		return false, err
 	}
 	if err := w.store.SetSpaces(arr, s.spaces); err != nil {
-		return err
+		return false, err
 	}
 	if w.oweNext {
 		n, err := w.store.OweAll(arr, boot, now, trigger)
 		if err != nil {
-			return err
+			return false, err
 		}
 		w.oweNext = false
 		log.Printf("%s: %d window(s) owed their placement", trigger, n)
 	}
-	seen := seenWindows(s)
 	if err := w.store.NoteRuns(boot, seen); err != nil {
-		return err
+		return false, err
 	}
 	recorded, err := w.store.Recorded(arr, boot)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if recorded, err = w.rebind(arr, boot, now, recorded, seen); err != nil {
-		return err
+		return false, err
 	}
 	visible := visibleKeys(s)
 	both := make(map[string]bool, len(visible)+len(w.prevVisible))
@@ -274,17 +315,17 @@ func (w *watcher) lookOnMain(trigger string) error {
 	}
 	ds := arrangement.Decide(recorded, arrangement.Look{Windows: seen, Visible: both})
 	if err := w.repair(s, arr, ds); err != nil {
-		return err
+		return false, err
 	}
 	if err := w.store.Apply(arr, boot, now, trigger, ds); err != nil {
-		return err
+		return false, err
 	}
 	if err := w.store.RefreshTitles(boot, seen); err != nil {
-		return err
+		return false, err
 	}
 	w.prevVisible = visible
 	logDecisions(trigger, ds)
-	return nil
+	return false, nil
 }
 
 // rebind binds the fresh windows of restarted apps to the records their
