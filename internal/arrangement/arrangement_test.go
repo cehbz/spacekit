@@ -32,3 +32,163 @@ func TestInPlaceHysteresis(t *testing.T) {
 		}
 	}
 }
+
+func rec(binding uint32, space string, f layout.Rect) Recorded {
+	return Recorded{Window: int64(binding) + 100, Binding: binding, Placed: true, Placement: Placement{space, f}}
+}
+
+func saw(binding uint32, space string, f layout.Rect) Seen {
+	return Seen{Binding: binding, PID: 1, App: "A", Placement: Placement{space, f}}
+}
+
+func vis(keys ...string) map[string]bool {
+	m := map[string]bool{}
+	for _, k := range keys {
+		m[k] = true
+	}
+	return m
+}
+
+func kinds(ds []Decision) []Kind {
+	var ks []Kind
+	for _, d := range ds {
+		ks = append(ks, d.Kind)
+	}
+	return ks
+}
+
+func wantKinds(t *testing.T, ds []Decision, want ...Kind) {
+	t.Helper()
+	got := kinds(ds)
+	if len(got) != len(want) {
+		t.Fatalf("decisions = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("decisions = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestDecideFirstSightingAdopts(t *testing.T) {
+	ds := Decide(nil, Look{Windows: []Seen{saw(1, "S1", full)}, Visible: vis("S9")})
+	wantKinds(t, ds, Adopt)
+	if ds[0].Window != 0 {
+		t.Fatalf("a never-seen window has no store identity yet, got %d", ds[0].Window)
+	}
+}
+
+func TestDecideBoundWithoutPlacementAdoptsForTheSameWindow(t *testing.T) {
+	r := Recorded{Window: 7, Binding: 1}
+	ds := Decide([]Recorded{r}, Look{Windows: []Seen{saw(1, "S1", full)}, Visible: vis("S1")})
+	wantKinds(t, ds, Adopt)
+	if ds[0].Window != 7 {
+		t.Fatalf("Window = %d, want 7", ds[0].Window)
+	}
+}
+
+func TestDecideInPlaceIsSilent(t *testing.T) {
+	jitter := layout.Rect{X: 1, Y: 30, W: 1279, H: 1410}
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S1", jitter)}, Visible: vis("S1")})
+	wantKinds(t, ds)
+}
+
+func TestDecideChangeOnAVisibleSpaceIsAdopted(t *testing.T) {
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, Visible: vis("S1")})
+	wantKinds(t, ds, Adopt)
+	if ds[0].Window != 101 {
+		t.Fatalf("Window = %d, want 101", ds[0].Window)
+	}
+}
+
+func TestDecideMoveOffAVisibleSpaceIsAdopted(t *testing.T) {
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S2", full)}, Visible: vis("S1")})
+	wantKinds(t, ds, Adopt)
+}
+
+func TestDecideChangeOnAnUnseenSpaceIsOwed(t *testing.T) {
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, Visible: vis("S9")})
+	wantKinds(t, ds, Owe, Repair)
+	if ds[1].Move || ds[1].Resize {
+		t.Fatalf("its space is not visible and it is on the right space: nothing to do yet, got %+v", ds[1])
+	}
+	if _, ok := ds[1].Progress(); ok {
+		t.Fatal("a repair that did nothing leaves no progress")
+	}
+}
+
+func TestDecideUnseenSpaceChangeIsMovedBack(t *testing.T) {
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S2", full)}, Visible: vis("S9")})
+	wantKinds(t, ds, Owe, Repair)
+	if !ds[1].Move || ds[1].Resize || ds[1].Want.Space != "S1" {
+		t.Fatalf("want a move back to S1 only, got %+v", ds[1])
+	}
+	if p, ok := ds[1].Progress(); !ok || p != Attempted {
+		t.Fatalf("frame already right, so the move completes the repair: got %v %v", p, ok)
+	}
+}
+
+func owedRec(binding uint32, space string, f layout.Rect, p Progress) Recorded {
+	r := rec(binding, space, f)
+	r.Owed, r.Progress = true, p
+	return r
+}
+
+func TestDecideOwedSeenInPlaceIsReleased(t *testing.T) {
+	ds := Decide([]Recorded{owedRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S1", full)}, Visible: vis("S9")})
+	wantKinds(t, ds, Release)
+}
+
+func TestDecideOwedIsResizedWhenItsSpaceIsVisible(t *testing.T) {
+	ds := Decide([]Recorded{owedRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, Visible: vis("S1")})
+	wantKinds(t, ds, Repair)
+	if ds[0].Move || !ds[0].Resize || ds[0].Want.Frame != full {
+		t.Fatalf("want a resize to the recorded frame, got %+v", ds[0])
+	}
+	if p, _ := ds[0].Progress(); p != Attempted {
+		t.Fatalf("Progress = %v, want Attempted", p)
+	}
+}
+
+func TestDecideOwedWaitsWhileDriftingUnseen(t *testing.T) {
+	drift := layout.Rect{X: 0, Y: 33, W: 735, H: 923}
+	ds := Decide([]Recorded{owedRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S1", drift)}, Visible: vis("S9")})
+	wantKinds(t, ds, Repair)
+	if ds[0].Move || ds[0].Resize {
+		t.Fatalf("nothing can be done until S1 is visible, got %+v", ds[0])
+	}
+}
+
+func TestDecideOwedOnWrongUnseenSpaceIsMovedOnly(t *testing.T) {
+	ds := Decide([]Recorded{owedRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S2", shrunk)}, Visible: vis("S9")})
+	wantKinds(t, ds, Repair)
+	if !ds[0].Move || ds[0].Resize {
+		t.Fatalf("want move only, got %+v", ds[0])
+	}
+	if p, _ := ds[0].Progress(); p != Moved {
+		t.Fatalf("Progress = %v, want Moved", p)
+	}
+}
+
+func TestDecideMovedWindowIsResizedOnceVisible(t *testing.T) {
+	ds := Decide([]Recorded{owedRec(1, "S1", full, Moved)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, Visible: vis("S1")})
+	wantKinds(t, ds, Repair)
+	if ds[0].Move || !ds[0].Resize {
+		t.Fatalf("want resize only, got %+v", ds[0])
+	}
+}
+
+func TestDecideGivesUpAfterAFullAttempt(t *testing.T) {
+	ds := Decide([]Recorded{owedRec(1, "S1", full, Attempted)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, Visible: vis("S1")})
+	wantKinds(t, ds, GiveUp)
+}
+
+func TestDecideGivesUpWhenTheMoveDidNotTake(t *testing.T) {
+	ds := Decide([]Recorded{owedRec(1, "S1", full, Moved)}, Look{Windows: []Seen{saw(1, "S2", full)}, Visible: vis("S9")})
+	wantKinds(t, ds, GiveUp)
+}
+
+func TestDecideIgnoresRecordedWindowsNotSeen(t *testing.T) {
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Visible: vis("S1")})
+	wantKinds(t, ds)
+}
