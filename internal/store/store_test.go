@@ -236,7 +236,7 @@ func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
 	if err := s.Apply(arr, boot, t0, "look", moved); err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.OweAll(arr, boot, t0, "display change")
+	n, err := s.OweAll(arr, boot, t0, "display change", []uint32{1, 2})
 	if err != nil || n != 2 {
 		t.Fatalf("OweAll = %d, %v; want 2", n, err)
 	}
@@ -246,7 +246,7 @@ func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
 			t.Fatalf("every placed window owed afresh: %+v", r)
 		}
 	}
-	if n, _ := s.OweAll(arr, boot.Add(time.Hour), t0, "display change"); n != 0 {
+	if n, _ := s.OweAll(arr, boot.Add(time.Hour), t0, "display change", []uint32{1, 2}); n != 0 {
 		t.Fatalf("another boot has nothing bound: %d", n)
 	}
 }
@@ -551,5 +551,31 @@ func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 	}
 	if again, _ := s.Prune(t0.Add(-90*24*time.Hour), boot); again != 0 {
 		t.Fatalf("a second prune finds nothing: %d", again)
+	}
+}
+
+// A window closed since it was recorded has nothing that could release it,
+// and a window recreated under a fresh id has two bindings in the boot: only
+// windows on screen are owed, each once.
+func TestOweAllOwesOnlyWindowsOnScreenEachOnce(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	a := adoptNew(t, s, arr, 1, "S1", full)
+	adoptNew(t, s, arr, 2, "S1", full) // closed since: not among the live ids
+	if err := s.Bind(arr, boot, t0, "relaunch", []Bound{{Window: a.Window, Seen: seenRun(9, 5, "t", "S1", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Release, Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.OweAll(arr, boot, t0, "display change", []uint32{9})
+	if err != nil || n != 1 {
+		t.Fatalf("OweAll = %d, %v; want 1", n, err)
+	}
+	if got := count(t, s, `SELECT COUNT(*) FROM owed`); got != 1 {
+		t.Fatalf("owed rows = %d, want 1", got)
+	}
+	if got := count(t, s, `SELECT window_id FROM owed`); int64(got) != a.Window {
+		t.Fatalf("the window on screen is the one owed: %d", got)
 	}
 }

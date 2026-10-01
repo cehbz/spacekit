@@ -308,7 +308,7 @@ func (w *watcher) lookOnMain(trigger string, first []arrangement.Seen) (moving b
 		return false, err
 	}
 	if w.oweNext {
-		n, err := w.store.OweAll(arr, boot, now, trigger)
+		n, err := w.store.OweAll(arr, boot, now, trigger, bindings(seen))
 		if err != nil {
 			return false, err
 		}
@@ -456,6 +456,15 @@ func (w *watcher) repair(s *snapshot, arr int64, ds []arrangement.Decision) erro
 		}
 	}
 	return nil
+}
+
+// bindings are the window-server ids of the windows a look saw.
+func bindings(seen []arrangement.Seen) []uint32 {
+	out := make([]uint32, len(seen))
+	for i, s := range seen {
+		out[i] = s.Binding
+	}
+	return out
 }
 
 // displaySet is the arrangement key for the displays present: their UUIDs,

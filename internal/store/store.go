@@ -255,9 +255,11 @@ func event(tx *sql.Tx, change, win int64, kind string) error {
 	return err
 }
 
-// OweAll marks every window bound in this boot that has a placement in the
-// arrangement as owed, with no repair progress. It returns how many are owed.
-func (s *Store) OweAll(arr int64, boot, at time.Time, cause string) (int, error) {
+// OweAll marks owed, with no repair progress, every window on screen (its
+// id in this boot is among live) that has a placement in the arrangement. A
+// window that is gone is not owed: nothing could release it. It returns how
+// many windows are owed.
+func (s *Store) OweAll(arr int64, boot, at time.Time, cause string, live []uint32) (int, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
@@ -268,21 +270,20 @@ func (s *Store) OweAll(arr int64, boot, at time.Time, cause string) (int, error)
 		return 0, err
 	}
 	change, _ := res.LastInsertId()
-	if _, err := tx.Exec(`UPDATE owed SET progress = 0 WHERE arrangement_id = ?`, arr); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(`
-		INSERT OR IGNORE INTO owed(window_id, arrangement_id, progress, since)
-		SELECT p.window_id, p.arrangement_id, 0, ?1
-		FROM placement p JOIN binding b ON b.window_id = p.window_id AND b.boot = ?2
-		WHERE p.arrangement_id = ?3 AND p.closed_by IS NULL`, change, boot.Unix(), arr); err != nil {
-		return 0, err
-	}
-	var n int
-	if err := tx.QueryRow(`
-		SELECT COUNT(*) FROM owed o JOIN binding b ON b.window_id = o.window_id AND b.boot = ?1
-		WHERE o.arrangement_id = ?2`, boot.Unix(), arr).Scan(&n); err != nil {
-		return 0, err
+	n := 0
+	for _, wid := range live {
+		res, err := tx.Exec(`
+			INSERT INTO owed(window_id, arrangement_id, progress, since)
+			SELECT p.window_id, p.arrangement_id, 0, ?1
+			FROM placement p JOIN binding b ON b.window_id = p.window_id
+			WHERE b.boot = ?2 AND b.wid = ?3 AND p.arrangement_id = ?4 AND p.closed_by IS NULL
+			ON CONFLICT(window_id, arrangement_id) DO UPDATE SET progress = 0`, change, boot.Unix(), wid, arr)
+		if err != nil {
+			return 0, err
+		}
+		if k, _ := res.RowsAffected(); k > 0 {
+			n++
+		}
 	}
 	if _, err := tx.Exec(`UPDATE change SET note = ? WHERE id = ?`, fmt.Sprintf("%d windows owed", n), change); err != nil {
 		return 0, err
