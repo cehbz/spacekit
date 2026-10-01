@@ -32,6 +32,10 @@ const (
 	quietExit = 2 * time.Minute
 	// savesEvery is how many interval looks pass between snapshot saves.
 	savesEvery = 3
+	// retention is how long history is kept.
+	retention = 90 * 24 * time.Hour
+	// pruneEvery is the number of interval looks between prunes (one-minute looks).
+	pruneEvery = 1440
 )
 
 type watchOptions struct {
@@ -93,6 +97,7 @@ func (w *watcher) loop() {
 	sweep := time.NewTicker(sweepInterval)
 	defer sweep.Stop()
 
+	w.prune()
 	w.recoverDisturbances()
 	w.startBoot()
 	w.look("startup")
@@ -113,6 +118,9 @@ func (w *watcher) loop() {
 			if w.ticks++; w.ticks%savesEvery == 0 {
 				w.save("interval")
 			}
+			if w.ticks%pruneEvery == 0 {
+				w.prune()
+			}
 		case <-sweep.C:
 			w.sweep()
 		case <-settled:
@@ -126,6 +134,18 @@ func (w *watcher) loop() {
 			w.look(trigger)
 			w.save("space change")
 		}
+	}
+}
+
+// prune deletes history past the retention period.
+func (w *watcher) prune() {
+	n, err := w.store.Prune(time.Now().Add(-retention), bootTime())
+	if err != nil {
+		log.Printf("prune failed: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Printf("pruned %d placement version(s) older than %d days", n, int(retention.Hours()/24))
 	}
 }
 

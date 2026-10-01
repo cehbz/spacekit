@@ -40,6 +40,9 @@ commands:
             transient display drop, and login convergence (the launchd agent)
   inspect   print every recorded window with its space, CGWindow bounds, and
             the frame its app reports via Accessibility (needs Accessibility)
+  log       list recent changes to the arrangement and disturbances
+  undo N    revert change N from the log; the agent puts the windows back
+  owe       have the agent put every window back at its recorded placement
 
 flags (after the command):
   -f path   use an explicit file instead of the snapshot history
@@ -55,6 +58,8 @@ flags (after the command):
   -interval D  watch: look interval (default 1m); snapshots are saved every third look
   -boot        watch: run login convergence even if this boot already has snapshots
   -boot-cap D  watch: hard cap on login convergence (default 10m)
+  -last N   log: how many changes to show (default 20)
+  -v        log: one line per window under each change
 `)
 	os.Exit(2)
 }
@@ -78,6 +83,8 @@ func main() {
 	interval := fs.Duration("interval", time.Minute, "watch: look interval; snapshots are saved every third look")
 	forceBoot := fs.Bool("boot", false, "watch: run login convergence even if this boot already has snapshots")
 	bootCap := fs.Duration("boot-cap", 10*time.Minute, "watch: hard cap on login convergence")
+	last := fs.Int("last", 20, "log: changes to show")
+	verbose := fs.Bool("v", false, "log: per-window lines")
 	fs.Parse(os.Args[2:])
 
 	var err error
@@ -92,6 +99,15 @@ func main() {
 		err = showCmd(*file, *from, *latest, *highWater, *settled)
 	case "inspect":
 		err = inspectCmd()
+	case "log":
+		err = logCmd(*last, *verbose)
+	case "undo":
+		if fs.NArg() != 1 {
+			usage()
+		}
+		err = undoCmd(fs.Arg(0))
+	case "owe":
+		err = oweCmd()
 	case "watch":
 		err = watchCmd(watchOptions{
 			interval: *interval, settle: *settled, bootCap: *bootCap, forceBoot: *forceBoot,
