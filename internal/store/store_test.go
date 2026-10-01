@@ -504,3 +504,52 @@ func TestUndoOfAnUnknownChangeIsAnError(t *testing.T) {
 		t.Fatal("want an error")
 	}
 }
+
+func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	old := t0.Add(-100 * 24 * time.Hour)
+	oldBoot := boot.Add(-100 * 24 * time.Hour)
+
+	// A window of this boot with one stale version and a current one.
+	if err := s.Apply(arr, boot, old, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(1, "S1", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	live := one(t, s, arr)
+	if err := s.Apply(arr, boot, old.Add(time.Hour), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: live.Window, Seen: seen(1, "S2", half)}}); err != nil {
+		t.Fatal(err)
+	}
+	// A window last bound in a boot long ago.
+	if err := s.Apply(arr, oldBoot, old, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(2, "S1", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	d, _ := s.BeginDisturbance("display", old)
+	s.EndDisturbance(d, old.Add(time.Minute))
+	s.BeginDisturbance("display", t0)
+
+	n, err := s.Prune(t0.Add(-90*24*time.Hour), boot)
+	if err != nil || n != 1 {
+		t.Fatalf("Prune = %d, %v; want the one closed stale version", n, err)
+	}
+	if got := one(t, s, arr); got.Space != "S2" || got.Frame != half {
+		t.Fatalf("the current placement survives: %+v", got)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM window`); n != 1 {
+		t.Fatalf("the long-gone window is deleted: %d windows", n)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM placement`); n != 1 {
+		t.Fatalf("placements = %d, want 1", n)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM change`); n != 1 {
+		t.Fatalf("only the change the current placement was opened by remains: %d", n)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM event`); n != 0 {
+		t.Fatalf("events of pruned changes are deleted: %d", n)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM disturbance`); n != 1 {
+		t.Fatalf("the ended stale disturbance is deleted, the open one kept: %d", n)
+	}
+	if again, _ := s.Prune(t0.Add(-90*24*time.Hour), boot); again != 0 {
+		t.Fatalf("a second prune finds nothing: %d", again)
+	}
+}

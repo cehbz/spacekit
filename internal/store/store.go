@@ -649,3 +649,51 @@ func (s *Store) Undo(change int64, at time.Time) (reverted, skipped int, err err
 	}
 	return reverted, skipped, tx.Commit()
 }
+
+// Prune deletes history older than the cutoff: windows last bound in a boot
+// that began before it and not bound in the current boot, closed placement
+// versions whose closing change predates it, the events of changes that old,
+// changes nothing refers to any more, and disturbances that ended before it.
+// It returns the number of closed placement versions deleted.
+func (s *Store) Prune(cutoff, boot time.Time) (int, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	ms, sec := cutoff.UnixMilli(), cutoff.Unix()
+	gone := `SELECT w.id FROM window w WHERE w.first_seen < ?1 AND NOT EXISTS
+		(SELECT 1 FROM binding b WHERE b.window_id = w.id AND (b.boot = ?2 OR b.boot >= ?3))`
+	for _, q := range []string{
+		`DELETE FROM owed WHERE window_id IN (` + gone + `)`,
+		`DELETE FROM event WHERE window_id IN (` + gone + `)`,
+		`DELETE FROM placement WHERE window_id IN (` + gone + `)`,
+		`DELETE FROM binding WHERE window_id IN (` + gone + `)`,
+	} {
+		if _, err := tx.Exec(q, ms, boot.Unix(), sec); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM window WHERE first_seen < ?1 AND NOT EXISTS (SELECT 1 FROM binding b WHERE b.window_id = window.id)`, ms); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`DELETE FROM placement WHERE closed_by IN (SELECT id FROM change WHERE at < ?)`, ms)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	if _, err := tx.Exec(`DELETE FROM event WHERE change_id IN (SELECT id FROM change WHERE at < ?)`, ms); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM change WHERE at < ?
+		AND id NOT IN (SELECT opened_by FROM placement)
+		AND id NOT IN (SELECT closed_by FROM placement WHERE closed_by IS NOT NULL)
+		AND id NOT IN (SELECT since FROM owed)
+		AND id NOT IN (SELECT change_id FROM event)`, ms); err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM disturbance WHERE ended IS NOT NULL AND ended < ?`, ms); err != nil {
+		return 0, err
+	}
+	return int(n), tx.Commit()
+}
