@@ -180,13 +180,13 @@ func TestRepairRecordsProgress(t *testing.T) {
 	want := arrangement.Placement{Space: "S1", Frame: full}
 	ds := []arrangement.Decision{
 		{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S2", half)},
-		{Kind: arrangement.Repair, Window: r.Window, Seen: seen(42, "S2", half), Want: want, Move: true},
+		{Kind: arrangement.Repair, Window: r.Window, Seen: seen(42, "S2", half), Want: want, Move: true, Resize: true},
 	}
 	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
 		t.Fatal(err)
 	}
-	if got := one(t, s, arr); got.Progress != arrangement.Moved {
-		t.Fatalf("Progress = %v, want Moved", got.Progress)
+	if got := one(t, s, arr); got.Progress != arrangement.Attempted {
+		t.Fatalf("Progress = %v, want Attempted", got.Progress)
 	}
 }
 

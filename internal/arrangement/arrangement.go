@@ -23,22 +23,22 @@ type Placement struct {
 // InPlace reports whether q is on the same space as p and within Tolerance of
 // it on every edge.
 func (p Placement) InPlace(q Placement) bool {
-	return p.Space == q.Space && sameFrame(p.Frame, q.Frame)
+	return p.Space == q.Space && SameFrame(p.Frame, q.Frame)
 }
 
-func sameFrame(a, b layout.Rect) bool {
+// SameFrame reports whether two frames are within Tolerance on every edge.
+func SameFrame(a, b layout.Rect) bool {
 	near := func(x, y float64) bool { return math.Abs(x-y) <= Tolerance }
 	return near(a.X, b.X) && near(a.Y, b.Y) && near(a.X+a.W, b.X+b.W) && near(a.Y+a.H, b.Y+b.H)
 }
 
-// Progress records how far the last repair of an owed window got, for the
-// next look to judge.
+// Progress records whether a repair of an owed window has been attempted,
+// for the next look to judge.
 type Progress int
 
 const (
-	Untried   Progress = iota
-	Moved              // moved to its space; its frame could not be reached yet
-	Attempted          // everything it needed has been attempted
+	Untried   Progress = 0
+	Attempted Progress = 2 // the window was moved, resized, or both
 )
 
 // Recorded is a window as the store knows it in the current arrangement.
@@ -90,9 +90,9 @@ type Decision struct {
 // Decide compares each seen window with its record. A window with no record
 // or no placement is adopted where it is. A settled window that differs from
 // its placement is adopted when its old or new space was visible, and owed
-// otherwise. An owed window is released once seen in place, repaired where
-// that is possible now, and given up on when a completed attempt did not
-// take. Recorded windows the look did not see are left alone.
+// otherwise. An owed window is released once seen in place, repaired at once,
+// and given up on when an attempt did not take. Recorded windows the look did
+// not see are left alone.
 func Decide(recorded []Recorded, look Look) []Decision {
 	byBinding := make(map[uint32]Recorded, len(recorded))
 	for _, r := range recorded {
@@ -107,43 +107,36 @@ func Decide(recorded []Recorded, look Look) []Decision {
 		case !r.Placed:
 			out = append(out, Decision{Kind: Adopt, Window: r.Window, Seen: s})
 		case r.Owed:
-			out = append(out, owed(r, s, look.Visible))
+			out = append(out, owed(r, s))
 		case r.Placement.InPlace(s.Placement):
 		case look.Visible[r.Space] || look.Visible[s.Space]:
 			out = append(out, Decision{Kind: Adopt, Window: r.Window, Seen: s})
 		default:
-			out = append(out, Decision{Kind: Owe, Window: r.Window, Seen: s}, owed(r, s, look.Visible))
+			out = append(out, Decision{Kind: Owe, Window: r.Window, Seen: s}, owed(r, s))
 		}
 	}
 	return out
 }
 
-func owed(r Recorded, s Seen, visible map[string]bool) Decision {
+func owed(r Recorded, s Seen) Decision {
 	if r.Placement.InPlace(s.Placement) {
 		return Decision{Kind: Release, Window: r.Window, Seen: s}
 	}
-	wrongSpace := s.Space != r.Space
-	if r.Progress == Attempted || (r.Progress == Moved && wrongSpace) {
+	if r.Progress == Attempted {
 		return Decision{Kind: GiveUp, Window: r.Window, Seen: s}
 	}
 	return Decision{
 		Kind: Repair, Window: r.Window, Seen: s, Want: r.Placement,
-		Move:   wrongSpace,
-		Resize: visible[r.Space] && !sameFrame(r.Frame, s.Frame),
+		Move:   s.Space != r.Space,
+		Resize: !SameFrame(r.Frame, s.Frame),
 	}
 }
 
-// Progress is what a repair leaves for the next look: Attempted when the
-// frame was written or only the space was wrong, Moved when the window was
-// moved and its frame is still to do. ok is false when nothing was done.
+// Progress is what a repair leaves for the next look: Attempted once the
+// window was moved or resized. ok is false when nothing was done.
 func (d Decision) Progress() (p Progress, ok bool) {
-	switch {
-	case d.Kind != Repair:
-		return Untried, false
-	case d.Resize, d.Move && sameFrame(d.Want.Frame, d.Seen.Frame):
+	if d.Kind == Repair && (d.Move || d.Resize) {
 		return Attempted, true
-	case d.Move:
-		return Moved, true
 	}
 	return Untried, false
 }

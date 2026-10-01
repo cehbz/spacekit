@@ -73,7 +73,7 @@ func evidence(f Seen, o Stored, boot int64, live map[uint32]bool) int {
 		return none
 	}
 	title := f.Title != "" && f.Title == o.Title
-	frame := sameFrame(f.Frame, o.Frame)
+	frame := SameFrame(f.Frame, o.Frame)
 	switch {
 	case title && frame:
 		return titleAndFrame
