@@ -31,7 +31,33 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("schema: %w", err)
 	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db}, nil
+}
+
+// migrations bring a database from PRAGMA user_version n to n+1. schema.sql
+// is version 0.
+var migrations = []string{
+	`ALTER TABLE binding ADD COLUMN run INTEGER NOT NULL DEFAULT 0`,
+}
+
+func migrate(db *sql.DB) error {
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	for ; v < len(migrations); v++ {
+		if _, err := db.Exec(migrations[v]); err != nil {
+			return fmt.Errorf("migration %d: %w", v+1, err)
+		}
+		if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v+1)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -208,7 +234,7 @@ func newWindow(tx *sql.Tx, boot, at time.Time, s arrangement.Seen) (int64, error
 		return 0, err
 	}
 	win, _ := res.LastInsertId()
-	_, err = tx.Exec(`INSERT INTO binding(window_id, boot, wid) VALUES (?, ?, ?)`, win, boot.Unix(), s.Binding)
+	_, err = tx.Exec(`INSERT INTO binding(window_id, boot, wid, run) VALUES (?, ?, ?, ?)`, win, boot.Unix(), s.Binding, s.Run)
 	return win, err
 }
 
@@ -322,4 +348,107 @@ func (s *Store) OpenDisturbances() ([]Disturbance, error) {
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// Stored returns every window with a placement in the arrangement, with its
+// latest binding: the candidates for binding fresh ids after a relaunch.
+func (s *Store) Stored(arr int64) ([]arrangement.Stored, error) {
+	rows, err := s.db.Query(`
+		SELECT w.id, w.bundle, w.app, w.title, p.space, p.x, p.y, p.w, p.h,
+		       COALESCE(b.boot, 0), COALESCE(b.wid, 0), COALESCE(b.run, 0)
+		FROM placement p
+		JOIN window w ON w.id = p.window_id
+		LEFT JOIN binding b ON b.rowid = (SELECT MAX(rowid) FROM binding WHERE window_id = w.id)
+		WHERE p.arrangement_id = ? AND p.closed_by IS NULL
+		ORDER BY w.id`, arr)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []arrangement.Stored
+	for rows.Next() {
+		var o arrangement.Stored
+		if err := rows.Scan(&o.Window, &o.Bundle, &o.App, &o.Title, &o.Space, &o.Frame.X, &o.Frame.Y, &o.Frame.W, &o.Frame.H,
+			&o.Boot, &o.Binding, &o.Run); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// KnownRuns returns the app runs that have bindings in this boot.
+func (s *Store) KnownRuns(boot time.Time) (map[int64]bool, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT run FROM binding WHERE boot = ? AND run <> 0`, boot.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var run int64
+		if err := rows.Scan(&run); err != nil {
+			return nil, err
+		}
+		out[run] = true
+	}
+	return out, rows.Err()
+}
+
+// NoteRuns records the app run of bindings that lack one.
+func (s *Store) NoteRuns(boot time.Time, seen []arrangement.Seen) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, w := range seen {
+		if w.Run == 0 {
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE binding SET run = ? WHERE boot = ? AND wid = ? AND run = 0`, w.Run, boot.Unix(), w.Binding); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// Bound pairs a stored window with the fresh window that recreates it.
+type Bound struct {
+	Window int64
+	Seen   arrangement.Seen
+}
+
+// Bind gives stored windows their fresh ids and owes each its placement.
+func (s *Store) Bind(arr int64, boot, at time.Time, cause string, bound []Bound) error {
+	if len(bound) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`INSERT INTO change(at, cause, note) VALUES (?, ?, ?)`, at.UnixMilli(), cause, fmt.Sprintf("%d windows bound", len(bound)))
+	if err != nil {
+		return err
+	}
+	change, _ := res.LastInsertId()
+	for _, b := range bound {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO binding(window_id, boot, wid, run) VALUES (?, ?, ?, ?)`,
+			b.Window, boot.Unix(), b.Seen.Binding, b.Seen.Run); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE window SET title = ?, app = ? WHERE id = ?`, b.Seen.Title, b.Seen.App, b.Window); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO owed(window_id, arrangement_id, progress, since) VALUES (?, ?, 0, ?)
+			ON CONFLICT(window_id, arrangement_id) DO UPDATE SET progress = 0`, b.Window, arr, change); err != nil {
+			return err
+		}
+		if err := event(tx, change, b.Window, "bound"); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

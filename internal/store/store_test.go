@@ -283,3 +283,111 @@ func TestDisturbanceLifecycle(t *testing.T) {
 		t.Fatalf("still open: %+v", open2)
 	}
 }
+
+func seenRun(wid uint32, run int64, title, space string, f layout.Rect) arrangement.Seen {
+	s := seen(wid, space, f)
+	s.Run, s.Title = run, title
+	return s
+}
+
+func TestOpenMigratesAndReopens(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "m.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM pragma_table_info('binding') WHERE name = 'run'`); n != 1 {
+		t.Fatalf("binding.run missing after Open")
+	}
+	s.Close()
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s2.Close()
+	if n := count(t, s2, `PRAGMA user_version`); n < 1 {
+		t.Fatalf("user_version = %d", n)
+	}
+}
+
+func TestAdoptRecordsTheRunAndKnownRuns(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenRun(42, 777, "t", "S1", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	runs, err := s.KnownRuns(boot)
+	if err != nil || !runs[777] || len(runs) != 1 {
+		t.Fatalf("KnownRuns = %v, %v", runs, err)
+	}
+	if other, _ := s.KnownRuns(boot.Add(time.Hour)); len(other) != 0 {
+		t.Fatalf("another boot knows no runs: %v", other)
+	}
+}
+
+func TestNoteRunsFillsUnknownRunsOnly(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	adoptNew(t, s, arr, 42, "S1", full) // seen() carries no run
+	if err := s.NoteRuns(boot, []arrangement.Seen{seenRun(42, 555, "t", "S1", full)}); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, s, `SELECT run FROM binding WHERE wid = 42`); n != 555 {
+		t.Fatalf("run = %d, want 555", n)
+	}
+	if err := s.NoteRuns(boot, []arrangement.Seen{seenRun(42, 999, "t", "S1", full)}); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, s, `SELECT run FROM binding WHERE wid = 42`); n != 555 {
+		t.Fatalf("a known run must not be overwritten: %d", n)
+	}
+}
+
+func TestStoredCarriesTheLatestBinding(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenRun(42, 100, "autobrr", "S2", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.Stored(arr)
+	if err != nil || len(st) != 1 {
+		t.Fatalf("Stored = %+v, %v", st, err)
+	}
+	o := st[0]
+	if o.Title != "autobrr" || o.Bundle != "com.example" || o.Space != "S2" || o.Frame != full || o.Boot != boot.Unix() || o.Binding != 42 || o.Run != 100 {
+		t.Fatalf("stored = %+v", o)
+	}
+}
+
+func TestBindGivesAStoredWindowAFreshIdAndOwesIt(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenRun(42, 100, "autobrr", "S2", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := s.Stored(arr)
+	f := seenRun(900, 200, "autobrr - renamed", "S5", full)
+	if err := s.Bind(arr, boot, t0.Add(time.Minute), "relaunch", []Bound{{Window: st[0].Window, Seen: f}}); err != nil {
+		t.Fatal(err)
+	}
+	rs, _ := s.Recorded(arr, boot)
+	var got *arrangement.Recorded
+	for i := range rs {
+		if rs[i].Binding == 900 {
+			got = &rs[i]
+		}
+	}
+	if got == nil || got.Window != st[0].Window || !got.Owed || got.Space != "S2" {
+		t.Fatalf("the fresh id is the same window, owed its recorded placement: %+v", rs)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM window`); n != 1 {
+		t.Fatalf("binding must not create a window: %d", n)
+	}
+	st2, _ := s.Stored(arr)
+	if st2[0].Binding != 900 || st2[0].Run != 200 || st2[0].Title != "autobrr - renamed" {
+		t.Fatalf("latest binding and title: %+v", st2[0])
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM event WHERE kind = 'bound'`); n != 1 {
+		t.Fatalf("bound events = %d", n)
+	}
+}
