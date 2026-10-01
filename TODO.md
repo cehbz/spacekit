@@ -2,7 +2,10 @@
 
 ## spacekeeper
 
-- Verify frame debt on a real wake: `watch.log` should show `frame debt: N window(s)` after `displays settled`, then `paid` lines as spaces are visited; confirm no debt was recorded for a window an app resized itself.
+- Verify the arrangement model on a real wake: `watch.log` should show `display change: N window(s) owed their placement`, `repaired` lines as spaces are visited, `released`, and no `released unrepaired`.
+- Slice 2: bind windows by matching at login and after an app relaunch, seed the arrangement from the newest snapshot once, then remove snapshots, their commands and login convergence. Fullscreen windows get placements.
+- Slice 3: `log`, `undo` and `owe` commands over the journal; delete closed placement versions older than 90 days.
+- Each look runs on the main thread, including a 500 ms wait after window-server moves; measure a look with many repairs and move the wait off the main thread if it stalls event delivery.
 - Verify at the next login that `login convergence` runs from the power-off snapshot and the event passes report `verified` counts (moves now run on the main thread via sysevents.OnMain). Check `watch.log` for the `will power off` snapshot from the preceding shutdown.
 - Tune convergence numbers (2m quiet-exit, 10m cap, 15s sweep, 1.5s post-launch delay) once a few real logins have logged pass timings.
 - Re-anchor after bridged moves: a window the agent moved back to its space can be left with AppKit believing it is on the other display (green-button menu and tiling options acted on the built-in display for a chat-space Chrome window). It was cured after a display reconfiguration and a 1 px AX position write; find which one does it, then have the settle pass apply the cheap one to every moved window on an active space.
