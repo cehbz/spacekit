@@ -391,3 +391,54 @@ func TestBindGivesAStoredWindowAFreshIdAndOwesIt(t *testing.T) {
 		t.Fatalf("bound events = %d", n)
 	}
 }
+
+func TestJournalShowsWhatEachChangeDid(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	r := adoptNew(t, s, arr, 42, "S1", full) // change 1: first sighting
+	if err := s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Apply(arr, boot, t0.Add(2*time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S2", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	j, err := s.Journal(10)
+	if err != nil || len(j) != 3 {
+		t.Fatalf("Journal = %d entries, %v", len(j), err)
+	}
+	if j[0].ID >= j[1].ID || j[1].ID >= j[2].ID {
+		t.Fatalf("oldest first: %v %v %v", j[0].ID, j[1].ID, j[2].ID)
+	}
+	first := j[0].Events[0]
+	if first.Kind != "adopted" || first.App != "Example" || first.From != nil || first.To == nil || first.To.Space != "S1" {
+		t.Fatalf("first sighting has no From: %+v", first)
+	}
+	second := j[1].Events[0]
+	if second.From == nil || second.From.Space != "S1" || second.From.Frame != full || second.To == nil || second.To.Space != "S2" || second.To.Frame != half {
+		t.Fatalf("adoption shows from and to: %+v", second)
+	}
+	if !j[1].At.Equal(t0.Add(time.Minute)) || j[1].Cause != "look" {
+		t.Fatalf("entry = %+v", j[1])
+	}
+	third := j[2].Events[0]
+	if third.Kind != "owed" || third.From != nil || third.To != nil {
+		t.Fatalf("owing changes no placement: %+v", third)
+	}
+	if last, _ := s.Journal(1); len(last) != 1 || last[0].ID != j[2].ID {
+		t.Fatalf("Journal(1) = %+v", last)
+	}
+}
+
+func TestDisturbancesListsEndedAndOpen(t *testing.T) {
+	s := open(t)
+	a, _ := s.BeginDisturbance("display", t0)
+	s.EndDisturbance(a, t0.Add(12*time.Second))
+	s.BeginDisturbance("display", t0.Add(time.Hour))
+	ds, err := s.Disturbances(10)
+	if err != nil || len(ds) != 2 {
+		t.Fatalf("Disturbances = %+v, %v", ds, err)
+	}
+	if !ds[0].Ended.Equal(t0.Add(12*time.Second)) || !ds[1].Ended.IsZero() {
+		t.Fatalf("ended times: %+v", ds)
+	}
+}
