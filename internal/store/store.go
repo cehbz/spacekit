@@ -575,3 +575,77 @@ func (s *Store) Disturbances(last int) ([]Disturbance, error) {
 	}
 	return out, rows.Err()
 }
+
+// Undo reverts the placements a change opened. A window whose placement from
+// that change is still current gets back the one the change closed, or none
+// if it had none, and is owed so the agent puts it there. A window whose
+// placement has changed again since is skipped. An undo that reverts nothing
+// writes nothing.
+func (s *Store) Undo(change int64, at time.Time) (reverted, skipped int, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM change WHERE id = ?`, change).Scan(&exists); err != nil {
+		return 0, 0, err
+	}
+	if exists == 0 {
+		return 0, 0, fmt.Errorf("no change %d", change)
+	}
+	type version struct {
+		id, win, arr int64
+		current      bool
+	}
+	rows, err := tx.Query(`SELECT id, window_id, arrangement_id, closed_by IS NULL FROM placement WHERE opened_by = ?`, change)
+	if err != nil {
+		return 0, 0, err
+	}
+	var vs []version
+	for rows.Next() {
+		var v version
+		if err := rows.Scan(&v.id, &v.win, &v.arr, &v.current); err != nil {
+			rows.Close()
+			return 0, 0, err
+		}
+		vs = append(vs, v)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, 0, err
+	}
+	var undo int64
+	for _, v := range vs {
+		if !v.current {
+			skipped++
+			continue
+		}
+		if undo == 0 {
+			res, err := tx.Exec(`INSERT INTO change(at, cause, note) VALUES (?, 'undo', ?)`, at.UnixMilli(), fmt.Sprintf("of change %d", change))
+			if err != nil {
+				return 0, 0, err
+			}
+			undo, _ = res.LastInsertId()
+		}
+		if _, err := tx.Exec(`UPDATE placement SET closed_by = ? WHERE id = ?`, undo, v.id); err != nil {
+			return 0, 0, err
+		}
+		if _, err := tx.Exec(`INSERT INTO placement(window_id, arrangement_id, space, x, y, w, h, opened_by)
+			SELECT window_id, arrangement_id, space, x, y, w, h, ? FROM placement
+			WHERE window_id = ? AND arrangement_id = ? AND closed_by = ?`, undo, v.win, v.arr, change); err != nil {
+			return 0, 0, err
+		}
+		if _, err := tx.Exec(`INSERT INTO owed(window_id, arrangement_id, progress, since) VALUES (?, ?, 0, ?)
+			ON CONFLICT(window_id, arrangement_id) DO UPDATE SET progress = 0`, v.win, v.arr, undo); err != nil {
+			return 0, 0, err
+		}
+		if err := event(tx, undo, v.win, "undone"); err != nil {
+			return 0, 0, err
+		}
+		reverted++
+	}
+	if reverted == 0 {
+		return 0, skipped, nil
+	}
+	return reverted, skipped, tx.Commit()
+}

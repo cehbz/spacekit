@@ -442,3 +442,65 @@ func TestDisturbancesListsEndedAndOpen(t *testing.T) {
 		t.Fatalf("ended times: %+v", ds)
 	}
 }
+
+func TestUndoRestoresThePriorPlacementAndOwesTheWindow(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	if err := s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}); err != nil {
+		t.Fatal(err)
+	}
+	bad := int64(count(t, s, `SELECT MAX(id) FROM change`))
+	reverted, skipped, err := s.Undo(bad, t0.Add(2*time.Minute))
+	if err != nil || reverted != 1 || skipped != 0 {
+		t.Fatalf("Undo = %d, %d, %v", reverted, skipped, err)
+	}
+	got := one(t, s, arr)
+	if got.Space != "S1" || got.Frame != full || !got.Owed || got.Progress != arrangement.Untried {
+		t.Fatalf("back at the prior placement and owed: %+v", got)
+	}
+	j, _ := s.Journal(1)
+	if j[0].Cause != "undo" || len(j[0].Events) != 1 || j[0].Events[0].Kind != "undone" {
+		t.Fatalf("the undo is journaled: %+v", j[0])
+	}
+}
+
+func TestUndoLeavesWindowsThatChangedAgain(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}})
+	bad := int64(count(t, s, `SELECT MAX(id) FROM change`))
+	s.Apply(arr, boot, t0.Add(2*time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S3", full)}})
+	before := count(t, s, `SELECT COUNT(*) FROM change`)
+	reverted, skipped, err := s.Undo(bad, t0.Add(3*time.Minute))
+	if err != nil || reverted != 0 || skipped != 1 {
+		t.Fatalf("Undo = %d, %d, %v", reverted, skipped, err)
+	}
+	if got := one(t, s, arr); got.Space != "S3" || got.Owed {
+		t.Fatalf("a later placement stands: %+v", got)
+	}
+	if after := count(t, s, `SELECT COUNT(*) FROM change`); after != before {
+		t.Fatalf("an undo that reverts nothing writes nothing: %d -> %d", before, after)
+	}
+}
+
+func TestUndoOfAFirstSightingLeavesNoPlacement(t *testing.T) {
+	s := open(t)
+	arr, _ := s.Arrangement("D1")
+	adoptNew(t, s, arr, 42, "S1", full)
+	reverted, _, err := s.Undo(1, t0.Add(time.Minute))
+	if err != nil || reverted != 1 {
+		t.Fatalf("Undo = %d, %v", reverted, err)
+	}
+	if got := one(t, s, arr); got.Placed {
+		t.Fatalf("no earlier placement to return to: %+v", got)
+	}
+}
+
+func TestUndoOfAnUnknownChangeIsAnError(t *testing.T) {
+	s := open(t)
+	if _, _, err := s.Undo(99, t0); err == nil {
+		t.Fatal("want an error")
+	}
+}
