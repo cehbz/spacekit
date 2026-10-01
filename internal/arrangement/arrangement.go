@@ -56,6 +56,7 @@ type Seen struct {
 	Binding            uint32
 	PID                int
 	Bundle, App, Title string
+	Run                int64 // start time of the owning process, unix microseconds; 0 if unknown
 	Placement
 }
 
