@@ -25,10 +25,15 @@ fullscreen state on a display.
 **Window.** A lasting identity: app, latest title, and a history of
 placements. It outlives reboots and app relaunches.
 
-**Binding.** The window-server id a window has in the current boot. Within a
-boot, windows are identified by binding alone. Matching by app, title and
-frame creates bindings only where ids are new: at login and after an app
-relaunch.
+**Binding.** The window-server id a window has in the current boot, together
+with the run of the app it belongs to (the owning process's start time).
+Within a run, windows are identified by binding alone, and a fresh id is a
+window the user opened. A fresh id in a run the store has not seen is a
+window recreated by a restart: it is bound to a stored window of the same app
+only on unambiguous evidence, the same non-empty title or a frame within the
+hysteresis band, with title and frame together settled first. Without such
+evidence it is a window of its own. A wrong binding moves an unrelated
+window; a missed one leaves a window where the app put it.
 
 **Look.** An observation of the live session: every minute, at each space
 change, and immediately before an announced disturbance (screen or system
@@ -36,7 +41,9 @@ sleep, power-off).
 
 **Disturbance.** A period during which the screen is not intent: a display
 change (until quiet for 10 s), the Mission Control overview, logout, a locked
-or sleeping session, and for one app's windows, that app's relaunch.
+or sleeping session, and for one app's windows, that app's relaunch: from the
+first look that sees a run of the app the store does not know until a look in
+which none of that run's windows is fresh.
 
 **Owed.** A window whose placement was put at risk by a disturbance and has
 not yet been seen back in place.
@@ -102,17 +109,17 @@ matching (now only for binding), `inspect`.
 ## Delivery in slices
 
 1. **In-session.** Store, looks, adoption, display disturbance, owed, repair,
-   release, overview and lock as disturbances. Identity by binding only. The
-   old wake restore and frame debt are removed; snapshot saving and login
-   convergence stay, unchanged, as the only login path.
-2. **Binding by matching.** Login and app relaunch bind through matching and
-   owe; the arrangement is seeded from the newest snapshot once. Snapshots,
-   their commands and login convergence are removed.
-3. **Repair tooling and retention.** `log`, `undo`, `owe`; 90-day pruning;
-   README, TODO and KB.
+   release, overview and lock as disturbances.
+2. **Relaunch binding (2a).** App runs on bindings; fresh windows of a
+   restarted app are bound on evidence and owed. Snapshot saving and login
+   convergence stay as the login path.
+3. **Login through the model (2b).** After a reboot every app is a restart,
+   so the same binding serves login. Snapshots, their commands and login
+   convergence are removed; a command that moves or resizes one window by id
+   replaces `restore -f` for on-machine tests.
+4. **Repair tooling and retention.** `log`, `undo`, `owe`; 90-day pruning.
 
-Each slice ends installed and running, verified by an induced display burst
-and, where it applies, a real wake.
+Each slice ends installed and running, verified on the machine.
 
 ## Testing
 
@@ -127,5 +134,7 @@ thin glue over those two.
   visible spaces; windows elsewhere are protected by rule 1.
 - AppKit's screen for a window is not observable; re-anchoring after a move
   stays an open item.
-- Binding across a reboot or relaunch is still matching by app, title and
-  frame.
+- Binding across a reboot or relaunch is matching by app, title and frame; a
+  recreated window whose title changed and whose frame is shared with others
+  stays unbound.
+- Fullscreen windows have no placements and are not restored.
