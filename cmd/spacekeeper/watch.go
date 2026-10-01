@@ -412,17 +412,26 @@ func (w *watcher) rebind(arr int64, boot, now time.Time, recorded []arrangement.
 	return w.store.Recorded(arr, boot)
 }
 
-// repair acts on Repair decisions: window-server moves first, then frame
-// writes for windows whose space is visible. A space that no longer
-// exists, or a frame write the app refused, clears that part of the
-// decision so it leaves no progress behind.
+// repair acts on Repair decisions. A window on the wrong space whose frame is
+// right is moved home. A window whose frame is wrong is resized through
+// Accessibility, which only reaches a window on a shown space: one on a
+// hidden space is first moved, with all the others, to the space its display
+// is showing, resized there, and moved home. Each step is awaited by polling
+// the window server. A window whose space no longer exists is skipped and
+// keeps no progress.
 func (w *watcher) repair(s *snapshot, arr int64, ds []arrangement.Decision) error {
 	saved, err := w.store.Spaces(arr)
 	if err != nil {
 		return err
 	}
 	resolved := layout.ResolveSpaces(saved, s.displays)
-	moves := make(map[uint64][]uint32)
+	displayOf := make(map[string]string, len(saved)) // space key -> display UUID
+	for _, sp := range saved {
+		displayOf[sp.UUID] = sp.DisplayUUID
+	}
+	home := make(map[uint64][]uint32)  // home space -> windows to send there
+	stage := make(map[uint64][]uint32) // shown space -> windows to bring to it
+	var resize []*arrangement.Decision
 	for i := range ds {
 		d := &ds[i]
 		if d.Kind != arrangement.Repair {
@@ -433,29 +442,116 @@ func (w *watcher) repair(s *snapshot, arr int64, ds []arrangement.Decision) erro
 			d.Move, d.Resize = false, false
 			continue
 		}
-		if d.Move {
-			moves[target] = append(moves[target], d.Seen.Binding)
-		}
-	}
-	for target, wids := range moves {
-		if err := skylight.MoveWindowsToSpace(wids, target); err != nil {
-			log.Printf("moving %d window(s) to space %d: %v", len(wids), target, err)
-		}
-	}
-	if len(moves) > 0 {
-		time.Sleep(500 * time.Millisecond) // the move is asynchronous
-	}
-	for i := range ds {
-		d := &ds[i]
-		if d.Kind != arrangement.Repair || !d.Resize {
+		wid := d.Seen.Binding
+		if !d.Resize {
+			if d.Move {
+				home[target] = append(home[target], wid)
+			}
 			continue
 		}
-		f := d.Want.Frame
-		if err := skylight.SetWindowFrame(d.Seen.PID, d.Seen.Binding, f.X, f.Y, f.W, f.H); err != nil {
-			d.Resize = false
+		resize = append(resize, d)
+		shown := s.currentOf[displayOf[d.Want.Space]]
+		at := s.winSpace[wid]
+		if shown == 0 || (at == shown && target == shown) {
+			continue // already on its shown home space
+		}
+		if at != shown {
+			stage[shown] = append(stage[shown], wid)
+		}
+		if target != shown {
+			home[target] = append(home[target], wid)
 		}
 	}
+	if len(home) == 0 && len(resize) == 0 {
+		return nil
+	}
+	staged, tStage := moveAndWait(stage)
+	t0 := time.Now()
+	want := make(map[uint32]layout.Rect, len(resize))
+	for _, d := range resize {
+		f := d.Want.Frame
+		if err := skylight.SetWindowFrame(d.Seen.PID, d.Seen.Binding, f.X, f.Y, f.W, f.H); err == nil {
+			want[d.Seen.Binding] = f
+		}
+	}
+	_, framed := waitFor(stepTimeout, func() bool { return framesAre(want) })
+	tResize := time.Since(t0)
+	returned, tHome := moveAndWait(home)
+	if len(resize) > 0 {
+		log.Printf("repair: %d window(s) resized (%d staged in %s, resize %s settled=%v, %d moved home in %s)",
+			len(resize), staged, tStage.Round(time.Millisecond), tResize.Round(time.Millisecond), framed, returned, tHome.Round(time.Millisecond))
+	}
 	return nil
+}
+
+// stepTimeout bounds each awaited step of a repair.
+const stepTimeout = 2 * time.Second
+
+// moveAndWait moves each group of windows to its space and waits until the
+// window server reports every one there. It returns how many it moved and
+// how long the wait took.
+func moveAndWait(groups map[uint64][]uint32) (int, time.Duration) {
+	n := 0
+	for space, wids := range groups {
+		if err := skylight.MoveWindowsToSpace(wids, space); err != nil {
+			log.Printf("moving %d window(s) to space %d: %v", len(wids), space, err)
+			continue
+		}
+		n += len(wids)
+	}
+	if n == 0 {
+		return 0, 0
+	}
+	took, _ := waitFor(stepTimeout, func() bool {
+		for space, wids := range groups {
+			for _, wid := range wids {
+				ids, err := skylight.SpacesForWindow(wid)
+				if err != nil || len(ids) != 1 || ids[0] != space {
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return n, took
+}
+
+// framesAre reports whether the window server shows each window at its
+// wanted frame.
+func framesAre(want map[uint32]layout.Rect) bool {
+	if len(want) == 0 {
+		return true
+	}
+	wins, err := skylight.WindowList()
+	if err != nil {
+		return false
+	}
+	seen := 0
+	for _, w := range wins {
+		f, ok := want[w.Number]
+		if !ok {
+			continue
+		}
+		seen++
+		if !arrangement.SameFrame(f, layout.Rect{X: w.Bounds.X, Y: w.Bounds.Y, W: w.Bounds.Width, H: w.Bounds.Height}) {
+			return false
+		}
+	}
+	return seen == len(want)
+}
+
+// waitFor polls cond every 20 ms until it holds or the timeout passes.
+func waitFor(timeout time.Duration, cond func() bool) (time.Duration, bool) {
+	start := time.Now()
+	for {
+		if cond() {
+			return time.Since(start), true
+		}
+		if time.Since(start) >= timeout {
+			return time.Since(start), false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // bindings are the window-server ids of the windows a look saw.
