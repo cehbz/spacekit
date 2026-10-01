@@ -66,13 +66,15 @@ not yet been seen back in place.
 3. **Disturbance.** When a display change settles, every window with a
    placement in the now-current arrangement is owed. An app relaunch owes that
    app's windows. Login owes everything.
-4. **Repair.** An owed window is moved to its space at once (the window-server
-   move works for any space) and resized when its space is visible
-   (Accessibility reaches only visible spaces; position, then size, then
-   position). Repairs are attempted at every look.
-5. **Release.** An owed window seen in place is released. One whose repair was
-   attempted while visible and is still out of place at the following look is
-   released where it is, adopted, and logged.
+4. **Repair.** An owed window is repaired at once. If it is on the wrong
+   space it is moved to its own. If its frame is wrong it is resized through
+   Accessibility, which only reaches a window on a shown space: a window on a
+   hidden space is moved, with the others, to the space its display is
+   showing, resized there, and moved home (measured for two windows: 30 ms to
+   stage, 104 ms to resize, 21 ms to return).
+5. **Release.** An owed window seen in place is released. One still out of
+   place at the look after an attempt is released where it is, adopted, and
+   logged.
 6. **In place** means the same space and a frame within 3 px on each edge.
    That band is hysteresis: a difference inside it is neither adopted nor
    repaired, so a pixel of drift never becomes a change.
