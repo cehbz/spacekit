@@ -256,6 +256,9 @@ type FrameDebt struct {
 	ID         uint32
 	PID        int
 	Want, Seen Rect
+	// Tried is set once a payment has been attempted. Until then the window
+	// may still be drifting under macOS, so Seen is not a baseline.
+	Tried bool
 }
 
 // FrameDebts lists matched windows whose live frame differs from the saved
@@ -280,15 +283,24 @@ func FrameDebts(saved []SavedWindow, matched map[int]uint32, live []LiveWindow) 
 	return out
 }
 
-// Settle decides a debt against the current state of its window: pay when the
-// window is on an active space and unchanged since the debt was recorded;
-// drop when the window is gone, already shows the wanted frame, or its frame
-// changed some other way (the user moved it).
+// Settle decides a debt against the current state of its window. It is
+// dropped when the window is gone or already shows the wanted frame, waits
+// while its space is inactive, and is paid the first time its space is
+// active whatever its frame has become: macOS keeps moving windows for
+// seconds after a drop, and nobody can have touched a window on a space not
+// yet visited. After an attempt, a frame other than the one that attempt
+// left means the user or the app took over, and the debt is dropped.
 func (d FrameDebt) Settle(live *LiveWindow, activeSpaces map[uint64]bool, spaceOf map[uint32]uint64) (pay, drop bool) {
-	if live == nil || live.Frame == d.Want || live.Frame != d.Seen {
+	if live == nil || live.Frame == d.Want {
 		return false, true
 	}
-	return activeSpaces[spaceOf[d.ID]], false
+	if !activeSpaces[spaceOf[d.ID]] {
+		return false, false
+	}
+	if d.Tried && live.Frame != d.Seen {
+		return false, true
+	}
+	return true, false
 }
 
 // OverviewOpen reports whether Mission Control's overview is showing. While

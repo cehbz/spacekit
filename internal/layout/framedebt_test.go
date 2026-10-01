@@ -34,8 +34,10 @@ func TestFrameDebtSettle(t *testing.T) {
 		t.Fatal("inactive space: should wait")
 	}
 	moved := &LiveWindow{ID: 1, Frame: Rect{100, 100, 800, 600}}
-	if pay, drop := d.Settle(moved, map[uint64]bool{4: true}, spaceOf); pay || !drop {
-		t.Fatal("user changed the frame: should drop")
+	tried := d
+	tried.Tried = true
+	if pay, drop := tried.Settle(moved, map[uint64]bool{4: true}, spaceOf); pay || !drop {
+		t.Fatal("frame changed after an attempt: should drop")
 	}
 	if pay, drop := d.Settle(nil, map[uint64]bool{4: true}, spaceOf); pay || !drop {
 		t.Fatal("window gone: should drop")
@@ -43,5 +45,25 @@ func TestFrameDebtSettle(t *testing.T) {
 	done := &LiveWindow{ID: 1, Frame: d.Want}
 	if pay, drop := d.Settle(done, map[uint64]bool{3: true}, spaceOf); pay || !drop {
 		t.Fatal("already at the wanted frame: satisfied, drop")
+	}
+}
+
+// A window on a space nobody has visited can only have been moved by macOS
+// still settling after the drop; the debt must survive that and be paid when
+// the space becomes active. Only after a payment attempt does a further
+// change mean the user (or the app) took over.
+func TestFrameDebtSurvivesDriftBeforeFirstAttempt(t *testing.T) {
+	d := FrameDebt{ID: 1, PID: 10, Want: Rect{0, 30, 1280, 1410}, Seen: Rect{0, 517, 735, 923}}
+	drifted := &LiveWindow{ID: 1, Frame: Rect{0, 33, 735, 923}}
+	spaceOf := map[uint32]uint64{1: 4}
+	if pay, drop := d.Settle(drifted, map[uint64]bool{5: true}, spaceOf); pay || drop {
+		t.Fatal("drift on an inactive space before any attempt: keep waiting")
+	}
+	if pay, drop := d.Settle(drifted, map[uint64]bool{4: true}, spaceOf); !pay || drop {
+		t.Fatal("first time its space is active: pay, whatever the frame drifted to")
+	}
+	d.Tried = true
+	if pay, drop := d.Settle(drifted, map[uint64]bool{4: true}, spaceOf); pay || !drop {
+		t.Fatal("changed after an attempt: someone else took over, drop")
 	}
 }

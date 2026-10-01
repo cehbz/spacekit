@@ -289,7 +289,7 @@ func (w *watcher) payDebts(s *snapshot) {
 				if now[d.ID] == d.Want {
 					paid++
 				} else {
-					d.Seen = now[d.ID]
+					d.Seen, d.Tried = now[d.ID], true
 					keep = append(keep, d)
 				}
 			}
