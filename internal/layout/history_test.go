@@ -157,44 +157,6 @@ func TestSignatureDistinguishesContent(t *testing.T) {
 	}
 }
 
-func TestLatestBeforePicksNewestStrictlyBefore(t *testing.T) {
-	base := time.Date(2026, 9, 2, 10, 46, 0, 0, time.UTC)
-	ls := []Layout{
-		{SavedAt: base.Add(5 * time.Minute)},
-		{SavedAt: base.Add(-1 * time.Minute)},
-		{SavedAt: base.Add(-9 * time.Minute)},
-	}
-	if got := LatestBefore(ls, base); got != 1 {
-		t.Fatalf("LatestBefore = %d, want 1", got)
-	}
-}
-
-func TestLatestBeforeExcludesEqualAndEmpty(t *testing.T) {
-	base := time.Date(2026, 9, 2, 10, 46, 0, 0, time.UTC)
-	if got := LatestBefore([]Layout{{SavedAt: base}}, base); got != -1 {
-		t.Fatalf("equal timestamp: got %d, want -1", got)
-	}
-	if got := LatestBefore(nil, base); got != -1 {
-		t.Fatalf("empty: got %d, want -1", got)
-	}
-}
-
-func TestSameDisplaysIgnoresOrderAndCatchesChanges(t *testing.T) {
-	a := Stats{Displays: []DisplaySpaces{{"D1", 5}, {"D2", 1}}}
-	b := Stats{Displays: []DisplaySpaces{{"D2", 1}, {"D1", 5}}}
-	fewer := Stats{Displays: []DisplaySpaces{{"D1", 5}}}
-	count := Stats{Displays: []DisplaySpaces{{"D1", 4}, {"D2", 1}}}
-	if !a.SameDisplays(b) {
-		t.Fatal("order should not matter")
-	}
-	if a.SameDisplays(fewer) {
-		t.Fatal("missing display should differ")
-	}
-	if a.SameDisplays(count) {
-		t.Fatal("desktop count change should differ")
-	}
-}
-
 func TestHighWaterIndexPicksRichest(t *testing.T) {
 	base := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
 	two := []SavedSpace{{UUID: "a", DisplayUUID: "D1"}, {UUID: "b", DisplayUUID: "D2"}}
@@ -225,30 +187,6 @@ func TestFirstStartOfBoot(t *testing.T) {
 	}
 	if FirstStartOfBoot(before, time.Time{}) {
 		t.Fatal("unknown boot time: cannot claim a first start")
-	}
-}
-
-func TestReferenceForPicksNewestMatchingDisplaySetThisBoot(t *testing.T) {
-	boot := time.Date(2026, 9, 28, 0, 0, 0, 0, time.UTC)
-	two := []SavedSpace{{UUID: "a", DisplayUUID: "D1"}, {UUID: "b", DisplayUUID: "D2"}}
-	one := []SavedSpace{{UUID: "b", DisplayUUID: "D2"}}
-	burst := boot.Add(10 * time.Hour)
-	ls := []Layout{
-		{SavedAt: boot.Add(9 * time.Hour), Spaces: one}, // during the outage
-		{SavedAt: boot.Add(6 * time.Hour), Spaces: two}, // last good, this boot
-		{SavedAt: boot.Add(5 * time.Hour), Spaces: two},
-		{SavedAt: boot.Add(-1 * time.Hour), Spaces: two}, // previous boot
-		{SavedAt: boot.Add(11 * time.Hour), Spaces: two}, // after the burst
-	}
-	want := Layout{Spaces: two}.Stats()
-	if got := ReferenceFor(ls, burst, boot, want); got != 1 {
-		t.Fatalf("ReferenceFor = %d, want 1", got)
-	}
-	if got := ReferenceFor(ls, burst, boot, Layout{Spaces: one}.Stats()); got != 0 {
-		t.Fatalf("one-display want: got %d, want 0", got)
-	}
-	if got := ReferenceFor(ls[:1], burst, boot, want); got != -1 {
-		t.Fatalf("no match: got %d, want -1", got)
 	}
 }
 

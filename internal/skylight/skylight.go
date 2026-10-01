@@ -11,6 +11,7 @@ package skylight
 #include <CoreGraphics/CoreGraphics.h>
 #include <dlfcn.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 // Screen Recording access (CoreGraphics, 10.15+). kCGWindowName is only
 // populated for the caller's CGWindowListCopyWindowInfo when this is granted.
@@ -45,6 +46,15 @@ static unsigned long long sk_active_space(void) {
 	static sk_active_fn f = NULL;
 	if (!f) f = (sk_active_fn)sk_sym("SLSGetActiveSpace", "CGSGetActiveSpace");
 	return f ? f(sk_cid()) : 0;
+}
+
+static bool sk_session_locked(void) {
+	CFDictionaryRef d = CGSessionCopyCurrentDictionary();
+	if (!d) return false;
+	CFTypeRef v = CFDictionaryGetValue(d, CFSTR("CGSSessionScreenIsLocked"));
+	bool locked = v && CFGetTypeID(v) == CFBooleanGetTypeID() && CFBooleanGetValue((CFBooleanRef)v);
+	CFRelease(d);
+	return locked;
 }
 
 // CF objects cross into Go as XML plist bytes; howett.net/plist decodes them.
@@ -172,6 +182,9 @@ func decodeData(d C.CFDataRef, what string, v any) error {
 func ActiveSpaceID() uint64 {
 	return uint64(C.sk_active_space())
 }
+
+// SessionLocked reports whether the login session's screen is locked.
+func SessionLocked() bool { return bool(C.sk_session_locked()) }
 
 // ManagedDisplaySpaces returns every display with its ordered spaces.
 func ManagedDisplaySpaces() ([]Display, error) {

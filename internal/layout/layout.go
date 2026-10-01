@@ -130,41 +130,6 @@ func DefaultRestoreIndex(ls []Layout, boot time.Time, settle time.Duration) int 
 	return best
 }
 
-// LatestBefore returns the index of the newest layout saved strictly before
-// t, or -1. Used to pick the reference for a post-reconfiguration restore:
-// the last snapshot from before the displays started changing.
-func LatestBefore(ls []Layout, t time.Time) int {
-	best := -1
-	for i, l := range ls {
-		if !l.SavedAt.Before(t) {
-			continue
-		}
-		if best == -1 || l.SavedAt.After(ls[best].SavedAt) {
-			best = i
-		}
-	}
-	return best
-}
-
-// SameDisplays reports whether both stats describe the same displays with the
-// same number of desktops each, regardless of order. A transient display drop
-// ends in the same topology it started from; anything else is not one.
-func (s Stats) SameDisplays(o Stats) bool {
-	if len(s.Displays) != len(o.Displays) {
-		return false
-	}
-	counts := make(map[string]int, len(s.Displays))
-	for _, d := range s.Displays {
-		counts[d.DisplayUUID] = d.Spaces
-	}
-	for _, d := range o.Displays {
-		if n, ok := counts[d.DisplayUUID]; !ok || n != d.Spaces {
-			return false
-		}
-	}
-	return true
-}
-
 // FirstStartOfBoot reports whether no layout has been saved in the current
 // boot session, i.e. the agent is starting for the first time since boot and
 // login convergence is due. Uptime is not a usable signal: an OS upgrade or a
@@ -180,24 +145,6 @@ func FirstStartOfBoot(ls []Layout, boot time.Time) bool {
 		}
 	}
 	return true
-}
-
-// ReferenceFor picks the layout a settled display change should restore
-// from: the newest one saved in this boot session before the change began
-// whose display set equals the settled one. A snapshot taken during a
-// monitor outage has the wrong display set and is skipped, so a return after
-// hours restores the last layout that had that display.
-func ReferenceFor(ls []Layout, before, boot time.Time, want Stats) int {
-	best := -1
-	for i, l := range ls {
-		if !l.SavedAt.Before(before) || l.SavedAt.Before(boot) || !l.Stats().SameDisplays(want) {
-			continue
-		}
-		if best == -1 || l.SavedAt.After(ls[best].SavedAt) {
-			best = i
-		}
-	}
-	return best
 }
 
 // Signature is a stable fingerprint of a layout's content (spaces and windows,
@@ -246,61 +193,6 @@ type CurrentSpace struct {
 type CurrentDisplay struct {
 	UUID   string
 	Spaces []CurrentSpace
-}
-
-// FrameDebt is a window whose frame macOS changed during a display drop and
-// that still needs putting back. Accessibility can only resize windows on an
-// active space, so debts are paid as the user visits each space; a window
-// the user has since moved or resized is left alone.
-type FrameDebt struct {
-	ID         uint32
-	PID        int
-	Want, Seen Rect
-	// Tried is set once a payment has been attempted. Until then the window
-	// may still be drifting under macOS, so Seen is not a baseline.
-	Tried bool
-}
-
-// FrameDebts lists matched windows whose live frame differs from the saved
-// one and is smaller: a display drop only shrinks or squeezes windows, so a
-// window that grew resized itself and is left alone. Untitled windows
-// (popups, find bars) are skipped; they resize on their own too.
-func FrameDebts(saved []SavedWindow, matched map[int]uint32, live []LiveWindow) []FrameDebt {
-	byID := make(map[uint32]LiveWindow, len(live))
-	for _, l := range live {
-		byID[l.ID] = l
-	}
-	var out []FrameDebt
-	for si, wid := range matched {
-		s := saved[si]
-		l, ok := byID[wid]
-		if !ok || s.Fullscreen || s.Title == "" || l.Frame == s.Frame || l.Frame.W*l.Frame.H >= s.Frame.W*s.Frame.H {
-			continue
-		}
-		out = append(out, FrameDebt{ID: wid, PID: l.OwnerPID, Want: s.Frame, Seen: l.Frame})
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
-	return out
-}
-
-// Settle decides a debt against the current state of its window. It is
-// dropped when the window is gone or already shows the wanted frame, waits
-// while its space is inactive, and is paid the first time its space is
-// active whatever its frame has become: macOS keeps moving windows for
-// seconds after a drop, and nobody can have touched a window on a space not
-// yet visited. After an attempt, a frame other than the one that attempt
-// left means the user or the app took over, and the debt is dropped.
-func (d FrameDebt) Settle(live *LiveWindow, activeSpaces map[uint64]bool, spaceOf map[uint32]uint64) (pay, drop bool) {
-	if live == nil || live.Frame == d.Want {
-		return false, true
-	}
-	if !activeSpaces[spaceOf[d.ID]] {
-		return false, false
-	}
-	if d.Tried && live.Frame != d.Seen {
-		return false, true
-	}
-	return true, false
 }
 
 // OverviewOpen reports whether Mission Control's overview is showing. While

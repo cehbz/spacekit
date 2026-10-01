@@ -2,15 +2,18 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
-	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/cehbz/spacekit/internal/arrangement"
 	"github.com/cehbz/spacekit/internal/layout"
 	"github.com/cehbz/spacekit/internal/settle"
 	"github.com/cehbz/spacekit/internal/skylight"
+	"github.com/cehbz/spacekit/internal/store"
 	"github.com/cehbz/spacekit/internal/sysevents"
 )
 
@@ -26,6 +29,8 @@ const (
 	// long (no launch, no new match): the login storm is over. The cap is a
 	// backstop, not a tuning knob.
 	quietExit = 2 * time.Minute
+	// savesEvery is how many interval looks pass between snapshot saves.
+	savesEvery = 3
 )
 
 type watchOptions struct {
@@ -35,9 +40,10 @@ type watchOptions struct {
 	frames, create, fullscreen bool
 }
 
-// watcher is the resident agent: it saves on a timer and on sleep and
-// space-change events, restores after a transient display drop, and runs
-// the login convergence. All SkyLight work runs on the main thread via
+// watcher is the resident agent: it looks at the session on a timer and on
+// sleep and space-change events and reconciles it with the arrangement, owes
+// every window after a display change, saves snapshots, and runs the login
+// convergence. All SkyLight work runs on the main thread via
 // sysevents.OnMain; this loop only decides.
 type watcher struct {
 	opt      watchOptions
@@ -47,19 +53,27 @@ type watcher struct {
 	boot                      *reconciler // non-nil while login convergence runs
 	bootStarted, bootActivity time.Time
 
-	// debts are windows a display drop left at the wrong size, repaired as
-	// their spaces become active (layout.FrameDebt).
-	debts []layout.FrameDebt
+	store       *store.Store
+	burst       int64           // open display disturbance in the store, 0 if none
+	oweNext     bool            // a disturbance ended while the agent was down: owe at the next look
+	prevVisible map[string]bool // space keys visible at the previous look
+	asleep      bool            // screens or system asleep: the timer still fires in dark wake
+	ticks       int
 
 	// poweringOff is set by the power-off notification: the layout was saved
-	// at that moment and every later save is held, so the half-quit state of
-	// a logout in progress never enters history.
+	// at that moment and every later save and look is held, so the half-quit
+	// state of a logout in progress never enters history.
 	poweringOff bool
 }
 
 func watchCmd(o watchOptions) error {
 	log.SetFlags(log.Ldate | log.Ltime)
-	w := &watcher{opt: o, displays: settle.New(displayQuiet), spaces: settle.New(spaceQuiet)}
+	st, err := store.Open(filepath.Join(dataDir(), "spacekeeper.db"))
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	w := &watcher{opt: o, store: st, displays: settle.New(displayQuiet), spaces: settle.New(spaceQuiet)}
 	sysevents.Start()
 	go func() {
 		w.loop()
@@ -75,8 +89,9 @@ func (w *watcher) loop() {
 	sweep := time.NewTicker(sweepInterval)
 	defer sweep.Stop()
 
-	w.recoverPending()
+	w.recoverDisturbances()
 	w.startBoot()
+	w.look("startup")
 	w.save("startup")
 	for {
 		var settled, spaceQuietC <-chan time.Time
@@ -90,20 +105,17 @@ func (w *watcher) loop() {
 		case e := <-sysevents.Events():
 			w.handle(e)
 		case <-tick.C:
-			w.save("interval")
+			w.look("interval")
+			if w.ticks++; w.ticks%savesEvery == 0 {
+				w.save("interval")
+			}
 		case <-sweep.C:
 			w.sweep()
 		case <-settled:
 			w.displaysSettled()
 		case <-spaceQuietC:
 			w.spaces.Close()
-			if len(w.debts) > 0 {
-				sysevents.OnMain(func() {
-					if s, err := gather(); err == nil {
-						w.payDebts(s)
-					}
-				})
-			}
+			w.look("space change")
 			w.save("space change")
 		}
 	}
@@ -113,15 +125,20 @@ func (w *watcher) handle(e sysevents.Event) {
 	switch e.Kind {
 	case sysevents.DisplayReconfigured:
 		if w.displays.Note(e.At) {
-			log.Printf("display reconfiguration began (display %d, flags %#x); holding saves", e.Display, e.Flags)
-			w.writePending(e.At)
+			log.Printf("display change began (display %d, flags %#x); looks and saves held", e.Display, e.Flags)
+			if id, err := w.store.BeginDisturbance("display", e.At); err == nil {
+				w.burst = id
+			}
 		}
 	case sysevents.ScreensSleep, sysevents.SystemWillSleep:
+		w.look(e.Kind.String())
 		w.save(e.Kind.String())
+		w.asleep = true
 	case sysevents.WillPowerOff:
+		w.look(e.Kind.String())
 		w.save(e.Kind.String())
 		w.poweringOff = true
-		log.Printf("holding saves until exit")
+		log.Printf("holding looks and saves until exit")
 	case sysevents.SpaceChanged:
 		w.spaces.Note(e.At)
 	case sysevents.AppLaunched:
@@ -130,6 +147,7 @@ func (w *watcher) handle(e sysevents.Event) {
 			w.bootPass(e.Name + " launched")
 		}
 	case sysevents.ScreensWake, sysevents.SystemWake:
+		w.asleep = false
 		log.Printf("%s", e.Kind)
 	}
 }
@@ -160,147 +178,242 @@ func (w *watcher) save(reason string) {
 	}
 }
 
-// --- transient display drop ---
+// --- looking ---
 
-// pendingPath records an open display burst so a restarted watcher can still
-// finish it (crash recovery). Removed when the burst is handled.
-func pendingPath() string { return filepath.Join(dataDir(), "reconfig-pending") }
-
-func (w *watcher) writePending(at time.Time) {
-	if err := os.WriteFile(pendingPath(), []byte(at.Format(time.RFC3339Nano)), 0o600); err != nil {
-		log.Printf("could not record pending reconfiguration: %v", err)
-	}
-}
-
-func (w *watcher) recoverPending() {
-	data, err := os.ReadFile(pendingPath())
+// recoverDisturbances closes display disturbances left open by a restart
+// and arranges for the first look to owe every window, as their settle
+// would have.
+func (w *watcher) recoverDisturbances() {
+	open, err := w.store.OpenDisturbances()
 	if err != nil {
+		log.Printf("cannot read open disturbances: %v", err)
 		return
 	}
-	start, err := time.Parse(time.RFC3339Nano, string(data))
-	if err != nil {
-		os.Remove(pendingPath())
-		return
+	for _, d := range open {
+		w.store.EndDisturbance(d.ID, time.Now())
+		w.oweNext = true
+		log.Printf("a %s disturbance from %s was left open; windows will be owed", d.Kind, d.Began.Format("15:04:05"))
 	}
-	w.displays.Resume(start, time.Now())
-	log.Printf("resuming display reconfiguration that began %s", start.Format("15:04:05"))
 }
 
 func (w *watcher) displaysSettled() {
-	start := w.displays.Start()
 	w.displays.Close()
-	os.Remove(pendingPath())
+	if w.burst != 0 {
+		w.store.EndDisturbance(w.burst, time.Now())
+		w.burst = 0
+	}
 	if w.boot != nil {
 		w.bootPass("displays settled")
 		return
 	}
-	refs, err := listSnapshots()
-	if err != nil {
-		log.Printf("displays settled; cannot read history: %v", err)
-		return
-	}
-	sysevents.OnMain(func() {
-		s, err := gather()
-		if err != nil {
-			log.Printf("displays settled; gather failed: %v", err)
-			return
-		}
-		now := layout.Layout{Spaces: s.spaces}.Stats()
-		i := layout.ReferenceFor(layouts(refs), start, bootTime(), now)
-		if i < 0 {
-			log.Printf("displays settled to %s; no snapshot with that display set this boot; leaving windows alone", displaySummary(now))
-			return
-		}
-		ref := refs[i]
-		r := newReconciler(ref.l, w.opt.frames, w.opt.fullscreen)
-		_, st, err := r.passOn(s)
-		if err != nil {
-			log.Printf("displays settled; restore from %s failed: %v", filepath.Base(ref.path), err)
-			return
-		}
-		log.Printf("displays settled; restored from %s: matched %d, moved %d (%d verified), %d in place",
-			filepath.Base(ref.path), st.matched, st.moved, st.verified, st.inPlace)
-		w.debts = layout.FrameDebts(ref.l.Windows, layout.Match(ref.l.Windows, s.windows), s.windows)
-		if len(w.debts) > 0 {
-			log.Printf("frame debt: %d window(s) at the wrong size: %s", len(w.debts), debtNames(w.debts, s.windows))
-			if moved, err := gather(); err == nil {
-				w.payDebts(moved) // spaces just changed under the moved windows
-			}
-		}
-	})
+	w.oweNext = true
+	w.look("display change")
 	w.save("after reconfiguration")
 }
 
-// debtNames lists the apps and titles behind a set of debts, for the log.
-func debtNames(debts []layout.FrameDebt, live []layout.LiveWindow) string {
-	byID := make(map[uint32]layout.LiveWindow, len(live))
-	for _, l := range live {
-		byID[l.ID] = l
+// look observes the session and reconciles it with the arrangement. It
+// does nothing while a disturbance is in progress: the screen is not
+// intent then.
+func (w *watcher) look(trigger string) {
+	if w.poweringOff || w.asleep || w.displays.Open() || w.boot != nil {
+		return
 	}
-	names := make([]string, 0, len(debts))
-	for _, d := range debts {
-		l := byID[d.ID]
-		t := l.Title
+	sysevents.OnMain(func() {
+		if err := w.lookOnMain(trigger); err != nil {
+			log.Printf("look (%s) failed: %v", trigger, err)
+		}
+	})
+}
+
+func (w *watcher) lookOnMain(trigger string) error {
+	s, err := gather()
+	if err != nil {
+		return err
+	}
+	if layout.OverviewOpen(s.windows) || skylight.SessionLocked() {
+		return nil
+	}
+	boot, now := bootTime(), time.Now()
+	arr, err := w.store.Arrangement(displaySet(s.spaces))
+	if err != nil {
+		return err
+	}
+	if err := w.store.SetSpaces(arr, s.spaces); err != nil {
+		return err
+	}
+	if w.oweNext {
+		n, err := w.store.OweAll(arr, boot, now, trigger)
+		if err != nil {
+			return err
+		}
+		w.oweNext = false
+		log.Printf("%s: %d window(s) owed their placement", trigger, n)
+	}
+	recorded, err := w.store.Recorded(arr, boot)
+	if err != nil {
+		return err
+	}
+	visible := visibleKeys(s)
+	both := make(map[string]bool, len(visible)+len(w.prevVisible))
+	for k := range visible {
+		both[k] = true
+	}
+	for k := range w.prevVisible {
+		both[k] = true
+	}
+	seen := seenWindows(s)
+	ds := arrangement.Decide(recorded, arrangement.Look{Windows: seen, Visible: both})
+	if err := w.repair(s, arr, ds); err != nil {
+		return err
+	}
+	if err := w.store.Apply(arr, boot, now, trigger, ds); err != nil {
+		return err
+	}
+	if strings.Contains(trigger, "sleep") || strings.Contains(trigger, "power off") {
+		if err := w.store.RefreshTitles(boot, seen); err != nil {
+			return err
+		}
+	}
+	w.prevVisible = visible
+	logDecisions(trigger, ds)
+	return nil
+}
+
+// repair acts on Repair decisions: window-server moves first, then frame
+// writes for windows whose space is visible. A space that no longer
+// exists, or a frame write the app refused, clears that part of the
+// decision so it leaves no progress behind.
+func (w *watcher) repair(s *snapshot, arr int64, ds []arrangement.Decision) error {
+	saved, err := w.store.Spaces(arr)
+	if err != nil {
+		return err
+	}
+	resolved := layout.ResolveSpaces(saved, s.displays)
+	moves := make(map[uint64][]uint32)
+	for i := range ds {
+		d := &ds[i]
+		if d.Kind != arrangement.Repair {
+			continue
+		}
+		target, ok := resolved[d.Want.Space]
+		if !ok {
+			d.Move, d.Resize = false, false
+			continue
+		}
+		if d.Move {
+			moves[target] = append(moves[target], d.Seen.Binding)
+		}
+	}
+	for target, wids := range moves {
+		if err := skylight.MoveWindowsToSpace(wids, target); err != nil {
+			log.Printf("moving %d window(s) to space %d: %v", len(wids), target, err)
+		}
+	}
+	if len(moves) > 0 {
+		time.Sleep(500 * time.Millisecond) // the move is asynchronous
+	}
+	for i := range ds {
+		d := &ds[i]
+		if d.Kind != arrangement.Repair || !d.Resize {
+			continue
+		}
+		f := d.Want.Frame
+		if err := skylight.SetWindowFrame(d.Seen.PID, d.Seen.Binding, f.X, f.Y, f.W, f.H); err != nil {
+			d.Resize = false
+		}
+	}
+	return nil
+}
+
+// displaySet is the arrangement key for the displays present: their UUIDs,
+// sorted and comma-joined.
+func displaySet(spaces []layout.SavedSpace) string {
+	seen := map[string]bool{}
+	var ids []string
+	for _, sp := range spaces {
+		if !seen[sp.DisplayUUID] {
+			seen[sp.DisplayUUID] = true
+			ids = append(ids, sp.DisplayUUID)
+		}
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ",")
+}
+
+// visibleKeys are the keys of the spaces each display is showing.
+func visibleKeys(s *snapshot) map[string]bool {
+	out := make(map[string]bool, len(s.current))
+	for id := range s.current {
+		if key, ok := s.idToKey[id]; ok {
+			out[key] = true
+		}
+	}
+	return out
+}
+
+// seenWindows are the gathered windows on user desktops; fullscreen
+// windows are not placed.
+func seenWindows(s *snapshot) []arrangement.Seen {
+	out := make([]arrangement.Seen, 0, len(s.windows))
+	for _, l := range s.windows {
+		if _, fs := s.fsWindow[l.ID]; fs {
+			continue
+		}
+		out = append(out, arrangement.Seen{
+			Binding: l.ID, PID: l.OwnerPID, Bundle: l.BundleID, App: l.OwnerName, Title: l.Title,
+			Placement: arrangement.Placement{Space: s.idToKey[s.winSpace[l.ID]], Frame: l.Frame},
+		})
+	}
+	return out
+}
+
+// logDecisions writes one line per look that did something, and one line
+// per window given up on.
+func logDecisions(trigger string, ds []arrangement.Decision) {
+	var adopted, owed, released, repaired, gaveUp int
+	name := func(s arrangement.Seen) string {
+		t := s.Title
 		if len(t) > 24 {
 			t = t[:24]
 		}
-		names = append(names, l.OwnerName+" | "+t)
+		return s.App + " | " + t
 	}
-	return strings.Join(names, "; ")
-}
-
-// payDebts repairs the frames of debts whose windows are on an active space
-// and unchanged since the debt was recorded, and forgets debts whose windows
-// are gone or were changed by the user. Runs on the main thread.
-func (w *watcher) payDebts(s *snapshot) {
-	byID := make(map[uint32]*layout.LiveWindow, len(s.windows))
-	for i := range s.windows {
-		byID[s.windows[i].ID] = &s.windows[i]
-	}
-	var keep, attempted []layout.FrameDebt
-	dropped := 0
-	for _, d := range w.debts {
-		pay, drop := d.Settle(byID[d.ID], s.current, s.winSpace)
-		switch {
-		case drop:
-			dropped++
-		case pay:
-			if err := skylight.SetWindowFrame(d.PID, d.ID, d.Want.X, d.Want.Y, d.Want.W, d.Want.H); err != nil {
-				keep = append(keep, d)
-				continue
-			}
-			attempted = append(attempted, d)
-		default:
-			keep = append(keep, d)
+	var touched []string
+	named := map[uint32]bool{}
+	touch := func(s arrangement.Seen) {
+		if !named[s.Binding] {
+			named[s.Binding] = true
+			touched = append(touched, name(s))
 		}
 	}
-	// An AX write can return success without taking effect, so a payment
-	// counts only when the window server shows the wanted frame. A partial
-	// result keeps the debt with the new frame as its baseline.
-	paid := 0
-	if len(attempted) > 0 {
-		time.Sleep(300 * time.Millisecond) // AX resizes apply asynchronously
-		if after, err := gather(); err == nil {
-			now := make(map[uint32]layout.Rect, len(after.windows))
-			for _, l := range after.windows {
-				now[l.ID] = l.Frame
+	for _, d := range ds {
+		switch d.Kind {
+		case arrangement.Adopt:
+			adopted++
+		case arrangement.Owe:
+			owed++
+			touch(d.Seen)
+		case arrangement.Release:
+			released++
+		case arrangement.Repair:
+			if _, ok := d.Progress(); ok {
+				repaired++
+				touch(d.Seen)
 			}
-			for _, d := range attempted {
-				if now[d.ID] == d.Want {
-					paid++
-				} else {
-					d.Seen, d.Tried = now[d.ID], true
-					keep = append(keep, d)
-				}
-			}
-		} else {
-			keep = append(keep, attempted...)
+		case arrangement.GiveUp:
+			gaveUp++
+			f := d.Seen.Frame
+			log.Printf("released unrepaired: %s at %.0f,%.0f %.0fx%.0f on %.8s", name(d.Seen), f.X, f.Y, f.W, f.H, d.Seen.Space)
 		}
 	}
-	w.debts = keep
-	if paid > 0 || dropped > 0 || len(attempted) > 0 {
-		log.Printf("frame debt: paid %d, dropped %d, %d outstanding", paid, dropped, len(keep))
+	if adopted+owed+released+repaired+gaveUp == 0 {
+		return
 	}
+	line := fmt.Sprintf("look (%s): adopted %d, owed %d, repaired %d, released %d, gave up %d", trigger, adopted, owed, repaired, released, gaveUp)
+	if len(touched) > 0 {
+		line += ": " + strings.Join(touched, "; ")
+	}
+	log.Print(line)
 }
 
 // --- login convergence ---

@@ -52,7 +52,7 @@ flags (after the command):
   -frames   restore: also restore each window's position and size (needs Accessibility)
   -create   restore: recreate missing desktops via Mission Control, default on (-create=false to skip)
   -fullscreen  restore: re-fullscreen windows that were fullscreen when saved
-  -interval D  watch: periodic save interval (default 3m)
+  -interval D  watch: look interval (default 1m); snapshots are saved every third look
   -boot        watch: run login convergence even if this boot already has snapshots
   -boot-cap D  watch: hard cap on login convergence (default 10m)
 `)
@@ -75,7 +75,7 @@ func main() {
 	frames := fs.Bool("frames", false, "also restore window position/size, not just space")
 	create := fs.Bool("create", true, "recreate missing spaces via Mission Control (flashy)")
 	fullscreen := fs.Bool("fullscreen", false, "re-fullscreen windows that were fullscreen at save time")
-	interval := fs.Duration("interval", 3*time.Minute, "watch: periodic save interval")
+	interval := fs.Duration("interval", time.Minute, "watch: look interval; snapshots are saved every third look")
 	forceBoot := fs.Bool("boot", false, "watch: run login convergence even if this boot already has snapshots")
 	bootCap := fs.Duration("boot-cap", 10*time.Minute, "watch: hard cap on login convergence")
 	fs.Parse(os.Args[2:])
