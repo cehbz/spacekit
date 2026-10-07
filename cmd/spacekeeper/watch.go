@@ -132,7 +132,9 @@ func (w *watcher) loop() {
 				trigger, w.retry = w.retry, ""
 			}
 			w.look(trigger)
-			w.save("space change")
+			if trigger == "space change" {
+				w.save(trigger)
+			}
 		}
 	}
 }
@@ -277,9 +279,12 @@ func (w *watcher) look(trigger string) {
 }
 
 // putOff retries the look under the same trigger once the space-change
-// quiet period elapses.
+// quiet period elapses. A look put off again while it waits is logged only
+// the first time: the overview can show for minutes.
 func (w *watcher) putOff(trigger, why string) {
-	log.Printf("look (%s) put off: %s", trigger, why)
+	if w.retry == "" {
+		log.Printf("look (%s) put off: %s", trigger, why)
+	}
 	w.retry = trigger
 	w.spaces.Note(time.Now())
 }
