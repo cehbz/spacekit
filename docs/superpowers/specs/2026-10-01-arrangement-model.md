@@ -64,8 +64,11 @@ not yet been seen back in place.
 2. **First sighting.** A window with no placement in the current arrangement
    is adopted where it is.
 3. **Disturbance.** When a display change settles, every window with a
-   placement in the now-current arrangement is owed. An app relaunch owes that
-   app's windows. Login owes everything.
+   placement in the now-current arrangement is owed. A window bound to a
+   record is owed that record's placement. Login owes everything. While
+   Mission Control or Exposé is showing (WindowManager's `ExposeShieldWindow`
+   is in the window list) no look is taken: the list then carries thumbnail
+   frames; the look is retried after.
 4. **Repair.** An owed window is repaired at once. If it is on the wrong
    space it is moved to its own. If its frame is wrong it is resized through
    Accessibility, which only reaches a window on a shown space: a window on a
@@ -78,8 +81,13 @@ not yet been seen back in place.
 6. **In place** means the same space and a frame within 3 px on each edge.
    That band is hysteresis: a difference inside it is neither adopted nor
    repaired, so a pixel of drift never becomes a change.
-7. **Vanished windows** keep their placements, unbound, for matching at the
-   next relaunch or login, until retention expires.
+7. **Bindings are provisional.** A record's binding is dead as soon as its
+   window-server id is absent from the window list (a minimized window stays
+   listed). A vanished window keeps its placements, unbound, until retention
+   expires, and binds to the next window of its app that no record claims
+   when the evidence picks it: title and frame, then title, then frame,
+   unambiguous at that strength, whether the app restarted or rebuilt the
+   window in the same process.
 
 ## Storage
 
@@ -117,10 +125,11 @@ matching (now only for binding), `inspect`.
 
 1. **In-session.** Store, looks, adoption, display disturbance, owed, repair,
    release, overview and lock as disturbances.
-2. **Relaunch binding (2a).** App runs on bindings; fresh windows of a
-   restarted app are bound on evidence and owed. Snapshot saving and login
-   convergence stay as the login path.
-3. **Login through the model (2b).** After a reboot every app is a restart,
+2. **Provisional bindings (2a).** A binding is dead when its id leaves the
+   window list; an unclaimed window of the app binds to a dead record on
+   evidence and is owed. Snapshot saving and login convergence stay as the
+   login path.
+3. **Login through the model (2b).** After a reboot every binding is dead,
    so the same binding serves login. Snapshots, their commands and login
    convergence are removed; a command that moves or resizes one window by id
    replaces `restore -f` for on-machine tests.
