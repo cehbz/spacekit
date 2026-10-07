@@ -347,10 +347,11 @@ type snapshot struct {
 	spaces    []layout.SavedSpace
 	displays  []layout.CurrentDisplay
 	windows   []layout.LiveWindow
-	winSpace  map[uint32]uint64 // window ID -> current space ID
-	idToKey   map[uint64]string // space ID -> spaceKey
-	current   map[uint64]bool   // each display's current space ID
-	currentOf map[string]uint64 // display UUID -> the space it is showing
+	all       []layout.ListedWindow // the whole window list, unfiltered
+	winSpace  map[uint32]uint64     // window ID -> current space ID
+	idToKey   map[uint64]string     // space ID -> spaceKey
+	current   map[uint64]bool       // each display's current space ID
+	currentOf map[string]uint64     // display UUID -> the space it is showing
 	// fsSpace maps a fullscreen/tiled (type 4) space ID to its display UUID;
 	// fsWindow maps a window living in one to that display UUID.
 	fsSpace  map[uint64]string
@@ -405,6 +406,7 @@ func gather() (*snapshot, error) {
 		return t[wid]
 	}
 	for _, w := range wins {
+		s.all = append(s.all, layout.ListedWindow{ID: w.Number, OwnerName: w.OwnerName, Title: w.Name})
 		if w.Layer != 0 || w.Alpha == 0 || w.Bounds.Width < 50 || w.Bounds.Height < 50 {
 			continue
 		}
@@ -498,9 +500,9 @@ func buildLayout(s *snapshot) layout.Layout {
 	return l
 }
 
-// errOverviewOpen is returned by saveSnapshot while Mission Control is
+// errOverviewOpen is returned while Mission Control or App Exposé is
 // showing: the window list then holds thumbnail bounds, not a layout.
-var errOverviewOpen = errors.New("Mission Control is open")
+var errOverviewOpen = errors.New("the overview is showing")
 
 // saveSnapshot writes the current layout into history unless it is identical
 // to the newest snapshot. It returns the written path, or "" when unchanged.
@@ -509,7 +511,7 @@ func saveSnapshot(keep int, settle time.Duration) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if layout.OverviewOpen(s.windows) {
+	if layout.OverviewOpen(s.all) {
 		return "", errOverviewOpen
 	}
 	l := buildLayout(s)

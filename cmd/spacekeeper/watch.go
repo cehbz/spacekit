@@ -66,7 +66,7 @@ type watcher struct {
 	ticks       int
 
 	relaunching map[int64]bool // app runs whose windows are still appearing
-	retry       string         // trigger of a look put off because the screen was moving
+	retry       string         // trigger of a look put off: the screen was moving or the overview showing
 
 	// poweringOff is set by the power-off notification: the layout was saved
 	// at that moment and every later save and look is held, so the half-quit
@@ -252,7 +252,11 @@ func (w *watcher) look(trigger string) {
 	var first []arrangement.Seen
 	var err error
 	sysevents.OnMain(func() { first, err = sample() })
-	if err != nil {
+	switch {
+	case errors.Is(err, errOverviewOpen):
+		w.putOff(trigger, err.Error())
+		return
+	case err != nil:
 		log.Printf("look (%s) failed: %v", trigger, err)
 		return
 	}
@@ -262,37 +266,53 @@ func (w *watcher) look(trigger string) {
 	time.Sleep(stillGap)
 	var moving bool
 	sysevents.OnMain(func() { moving, err = w.lookOnMain(trigger, first) })
-	if err != nil {
+	switch {
+	case errors.Is(err, errOverviewOpen):
+		w.putOff(trigger, err.Error())
+	case err != nil:
 		log.Printf("look (%s) failed: %v", trigger, err)
-	}
-	if moving {
-		log.Printf("look (%s) put off: the screen is in motion", trigger)
-		w.retry = trigger
-		w.spaces.Note(time.Now())
+	case moving:
+		w.putOff(trigger, "the screen is in motion")
 	}
 }
 
-// sample observes the session's windows, or returns nil while the overview
-// is open or the session is locked: the screen is not intent then.
+// putOff retries the look under the same trigger once the space-change
+// quiet period elapses.
+func (w *watcher) putOff(trigger, why string) {
+	log.Printf("look (%s) put off: %s", trigger, why)
+	w.retry = trigger
+	w.spaces.Note(time.Now())
+}
+
+// sample observes the session's windows. It returns errOverviewOpen while
+// the overview is showing, and nil while the session is locked: the screen
+// is not intent then.
 func sample() ([]arrangement.Seen, error) {
 	s, err := gather()
 	if err != nil {
 		return nil, err
 	}
-	if layout.OverviewOpen(s.windows) || skylight.SessionLocked() {
+	if layout.OverviewOpen(s.all) {
+		return nil, errOverviewOpen
+	}
+	if skylight.SessionLocked() {
 		return nil, nil
 	}
 	return seenWindows(s), nil
 }
 
 // lookOnMain takes the look unless the session moved since the first sample,
-// which it reports as moving.
+// which it reports as moving, or the overview is showing, which it reports
+// as errOverviewOpen.
 func (w *watcher) lookOnMain(trigger string, first []arrangement.Seen) (moving bool, err error) {
 	s, err := gather()
 	if err != nil {
 		return false, err
 	}
-	if layout.OverviewOpen(s.windows) || skylight.SessionLocked() {
+	if layout.OverviewOpen(s.all) {
+		return false, errOverviewOpen
+	}
+	if skylight.SessionLocked() {
 		return false, nil
 	}
 	seen := seenWindows(s)

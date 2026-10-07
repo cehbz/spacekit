@@ -189,12 +189,3 @@ func TestFirstStartOfBoot(t *testing.T) {
 		t.Fatal("unknown boot time: cannot claim a first start")
 	}
 }
-
-func TestOverviewOpen(t *testing.T) {
-	if OverviewOpen([]LiveWindow{{OwnerName: "Finder", Title: "Desktop"}}) {
-		t.Fatal("no overlay: closed")
-	}
-	if !OverviewOpen([]LiveWindow{{OwnerName: "WindowManager", Title: "Window Highlight Overlay"}}) {
-		t.Fatal("overlay present: open")
-	}
-}

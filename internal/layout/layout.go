@@ -183,6 +183,14 @@ type LiveWindow struct {
 	Frame     Rect
 }
 
+// ListedWindow is one entry of the window server's whole list: every
+// window of every owner and layer, on screen or not.
+type ListedWindow struct {
+	ID        uint32
+	OwnerName string
+	Title     string
+}
+
 // CurrentSpace / CurrentDisplay mirror the current Mission Control state
 // (user spaces only), translated from skylight types by the caller.
 type CurrentSpace struct {
@@ -195,13 +203,13 @@ type CurrentDisplay struct {
 	Spaces []CurrentSpace
 }
 
-// OverviewOpen reports whether Mission Control's overview is showing. While
-// it is, CGWindow bounds are the scaled thumbnails, so a layout gathered
-// then is not one to keep. The overview adds WindowManager's highlight
-// overlay windows to the window list and nothing else does.
-func OverviewOpen(live []LiveWindow) bool {
-	for _, l := range live {
-		if l.OwnerName == "WindowManager" && l.Title == "Window Highlight Overlay" {
+// OverviewOpen reports whether Mission Control or App Exposé is showing.
+// While either is, CGWindow bounds are the scaled thumbnails, so a layout
+// gathered then is not one to keep. WindowManager's ExposeShieldWindow is
+// in the window list from entry to exit of both.
+func OverviewOpen(all []ListedWindow) bool {
+	for _, l := range all {
+		if l.OwnerName == "WindowManager" && l.Title == "ExposeShieldWindow" {
 			return true
 		}
 	}
