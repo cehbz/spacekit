@@ -75,7 +75,8 @@ type watcher struct {
 }
 
 func watchCmd(o watchOptions) error {
-	log.SetFlags(log.Ldate | log.Ltime)
+	log.SetFlags(0)
+	log.SetOutput(newZoneWriter(log.Writer(), "/etc/localtime"))
 	st, err := store.Open(filepath.Join(dataDir(), "spacekeeper.db"))
 	if err != nil {
 		return err
