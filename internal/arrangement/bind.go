@@ -1,14 +1,13 @@
 package arrangement
 
 // Stored is a placed window as the store last knew it bound: a candidate for
-// binding to a fresh window-server id after its app restarts.
+// binding to a fresh window-server id once that binding is dead.
 type Stored struct {
 	Window             int64
 	Bundle, App, Title string
 	Placement
 	Boot    int64  // boot (unix seconds) of its latest binding; 0 if it has none
 	Binding uint32 // window-server id in that boot
-	Run     int64  // app run that binding belonged to
 }
 
 // Evidence that a fresh window is a stored one recreated, strongest first.
@@ -20,9 +19,8 @@ const (
 )
 
 // Bind pairs fresh windows with the stored windows they recreate. A stored
-// window is a candidate for a fresh one of the same app unless it is still on
-// screen under its id or was bound in the fresh window's own run (then it was
-// closed, not lost to a restart). A pair is made only when the evidence is
+// window is a candidate for a fresh one of the same app unless its binding in
+// this boot is live. A pair is made only when the evidence is
 // unambiguous at its strength: one candidate for the fresh window, and one
 // fresh window for that candidate. Stronger evidence is settled first. The
 // result maps a fresh window's id to the stored window.
@@ -69,7 +67,7 @@ func evidence(f Seen, o Stored, boot int64, live map[uint32]bool) int {
 	if appKey(f.Bundle, f.App) != appKey(o.Bundle, o.App) {
 		return none
 	}
-	if o.Boot == boot && (live[o.Binding] || o.Run == f.Run) {
+	if o.Boot == boot && live[o.Binding] {
 		return none
 	}
 	title := f.Title != "" && f.Title == o.Title

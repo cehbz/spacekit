@@ -65,8 +65,7 @@ type watcher struct {
 	asleep      bool            // screens or system asleep: the timer still fires in dark wake
 	ticks       int
 
-	relaunching map[int64]bool // app runs whose windows are still appearing
-	retry       string         // trigger of a look put off: the screen was moving or the overview showing
+	retry string // trigger of a look put off: the screen was moving or the overview showing
 
 	// poweringOff is set by the power-off notification: the layout was saved
 	// at that moment and every later save and look is held, so the half-quit
@@ -82,7 +81,7 @@ func watchCmd(o watchOptions) error {
 		return err
 	}
 	defer st.Close()
-	w := &watcher{opt: o, store: st, displays: settle.New(displayQuiet), spaces: settle.New(spaceQuiet), relaunching: map[int64]bool{}}
+	w := &watcher{opt: o, store: st, displays: settle.New(displayQuiet), spaces: settle.New(spaceQuiet)}
 	sysevents.Start()
 	go func() {
 		w.loop()
@@ -336,14 +335,11 @@ func (w *watcher) lookOnMain(trigger string, first []arrangement.Seen) (moving b
 		w.oweNext = false
 		log.Printf("%s: %d window(s) owed their placement", trigger, n)
 	}
-	if err := w.store.NoteRuns(boot, seen); err != nil {
-		return false, err
-	}
 	recorded, err := w.store.Recorded(arr, boot)
 	if err != nil {
 		return false, err
 	}
-	if recorded, err = w.rebind(arr, boot, now, recorded, seen); err != nil {
+	if recorded, err = w.rebind(arr, boot, now, trigger, recorded, seen, s.all); err != nil {
 		return false, err
 	}
 	visible := visibleKeys(s)
@@ -369,39 +365,19 @@ func (w *watcher) lookOnMain(trigger string, first []arrangement.Seen) (moving b
 	return false, nil
 }
 
-// rebind binds the fresh windows of restarted apps to the records their
-// previous run left, and owes them their placements. A run is relaunching
-// from the first look that sees it until a look in which none of its windows
-// is fresh; a fresh window in any other run is simply a new window.
-func (w *watcher) rebind(arr int64, boot, now time.Time, recorded []arrangement.Recorded, seen []arrangement.Seen) ([]arrangement.Recorded, error) {
-	bound := make(map[uint32]bool, len(recorded))
+// rebind binds every seen window no record of this boot claims to the record
+// it recreates, if the evidence is unambiguous, and owes it its placement. A
+// record is a candidate once its id is absent from the whole window list.
+func (w *watcher) rebind(arr int64, boot, now time.Time, cause string, recorded []arrangement.Recorded, seen []arrangement.Seen, all []layout.ListedWindow) ([]arrangement.Recorded, error) {
+	claimed := make(map[uint32]bool, len(recorded))
 	for _, r := range recorded {
-		bound[r.Binding] = true
+		claimed[r.Binding] = true
 	}
-	known, err := w.store.KnownRuns(boot)
-	if err != nil {
-		return nil, err
-	}
-	live := make(map[uint32]bool, len(seen))
-	freshRuns := map[int64]bool{}
 	var fresh []arrangement.Seen
 	for _, s := range seen {
-		live[s.Binding] = true
-		if bound[s.Binding] || s.Run == 0 {
-			continue
-		}
-		if !known[s.Run] || w.relaunching[s.Run] {
+		if !claimed[s.Binding] {
 			fresh = append(fresh, s)
-			freshRuns[s.Run] = true
 		}
-	}
-	for run := range w.relaunching {
-		if !freshRuns[run] {
-			delete(w.relaunching, run)
-		}
-	}
-	for run := range freshRuns {
-		w.relaunching[run] = true
 	}
 	if len(fresh) == 0 {
 		return recorded, nil
@@ -409,6 +385,10 @@ func (w *watcher) rebind(arr int64, boot, now time.Time, recorded []arrangement.
 	stored, err := w.store.Stored(arr)
 	if err != nil {
 		return nil, err
+	}
+	live := make(map[uint32]bool, len(all))
+	for _, l := range all {
+		live[l.ID] = true
 	}
 	pairs := arrangement.Bind(fresh, stored, boot.Unix(), live)
 	if len(pairs) == 0 {
@@ -426,10 +406,10 @@ func (w *watcher) rebind(arr int64, boot, now time.Time, recorded []arrangement.
 			names = append(names, s.App+" | "+t)
 		}
 	}
-	if err := w.store.Bind(arr, boot, now, "relaunch", bs); err != nil {
+	if err := w.store.Bind(arr, boot, now, cause, bs); err != nil {
 		return nil, err
 	}
-	log.Printf("relaunch: bound %d of %d fresh window(s) to their records: %s", len(bs), len(fresh), strings.Join(names, "; "))
+	log.Printf("%s: bound %d of %d unclaimed window(s) to their records: %s", cause, len(bs), len(fresh), strings.Join(names, "; "))
 	return w.store.Recorded(arr, boot)
 }
 
@@ -614,21 +594,12 @@ func visibleKeys(s *snapshot) map[string]bool {
 // windows are not placed.
 func seenWindows(s *snapshot) []arrangement.Seen {
 	out := make([]arrangement.Seen, 0, len(s.windows))
-	runs := map[int]int64{}
-	run := func(pid int) int64 {
-		r, ok := runs[pid]
-		if !ok {
-			r = processStart(pid)
-			runs[pid] = r
-		}
-		return r
-	}
 	for _, l := range s.windows {
 		if _, fs := s.fsWindow[l.ID]; fs {
 			continue
 		}
 		out = append(out, arrangement.Seen{
-			Binding: l.ID, PID: l.OwnerPID, Bundle: l.BundleID, App: l.OwnerName, Title: l.Title, Run: run(l.OwnerPID),
+			Binding: l.ID, PID: l.OwnerPID, Bundle: l.BundleID, App: l.OwnerName, Title: l.Title,
 			Placement: arrangement.Placement{Space: s.idToKey[s.winSpace[l.ID]], Frame: l.Frame},
 		})
 	}
@@ -735,9 +706,6 @@ func (w *watcher) bootPassCreate(trigger string, create bool) {
 
 func (w *watcher) sweep() {
 	if w.boot == nil {
-		if len(w.relaunching) > 0 {
-			w.look("relaunch")
-		}
 		return
 	}
 	w.bootPass("sweep")

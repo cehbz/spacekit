@@ -9,14 +9,14 @@ import (
 const thisBoot = int64(1790652986)
 
 func fresh(wid uint32, title string, f layout.Rect) Seen {
-	return Seen{Binding: wid, PID: 5, Bundle: "com.google.Chrome", App: "Google Chrome", Title: title, Run: 200,
+	return Seen{Binding: wid, PID: 5, Bundle: "com.google.Chrome", App: "Google Chrome", Title: title,
 		Placement: Placement{Space: "S5", Frame: f}}
 }
 
-// left is a stored Chrome window from the app's previous run in this boot.
+// left is a stored Chrome window bound earlier in this boot.
 func left(win int64, title string, space string, f layout.Rect) Stored {
 	return Stored{Window: win, Bundle: "com.google.Chrome", App: "Google Chrome", Title: title,
-		Placement: Placement{Space: space, Frame: f}, Boot: thisBoot, Binding: uint32(win), Run: 100}
+		Placement: Placement{Space: space, Frame: f}, Boot: thisBoot, Binding: uint32(win)}
 }
 
 var (
@@ -78,21 +78,36 @@ func TestBindTitleAndFrameResolvesTwins(t *testing.T) {
 	}
 }
 
-func TestBindSkipsLiveAndSameRunAndOtherApps(t *testing.T) {
-	liveOne := left(1, "autobrr", "S2", full) // still on screen under its id
-	sameRun := left(2, "autobrr", "S2", full) // closed during this run: not relaunch debris
-	sameRun.Run = 200
+func TestBindSkipsLiveAndOtherApps(t *testing.T) {
+	liveOne := left(1, "autobrr", "S2", full) // still listed under its id
 	other := left(3, "autobrr", "S2", full)
 	other.Bundle, other.App = "com.apple.Safari", "Safari"
-	got := Bind([]Seen{fresh(900, "autobrr", full)}, []Stored{liveOne, sameRun, other}, thisBoot, map[uint32]bool{900: true, 1: true})
+	got := Bind([]Seen{fresh(900, "autobrr", full)}, []Stored{liveOne, other}, thisBoot, map[uint32]bool{900: true, 1: true})
 	if len(got) != 0 {
 		t.Fatalf("got %v, want none", got)
 	}
 }
 
+func TestBindInTheSameProcess(t *testing.T) {
+	// The app rebuilt its window without restarting: the record whose id
+	// left the list is a candidate.
+	rebuilt := left(16, "WhatsApp", "S2", full)
+	got := Bind([]Seen{fresh(24389, "WhatsApp", odd)}, []Stored{rebuilt}, thisBoot, map[uint32]bool{24389: true})
+	if got[24389] != 16 {
+		t.Fatalf("got %v, want 24389->16", got)
+	}
+}
+
+func TestBindNothingBetweenTwoDeadTwins(t *testing.T) {
+	st := []Stored{left(1, "WhatsApp", "S2", full), left(2, "WhatsApp", "S3", rightHalf)}
+	if got := Bind([]Seen{fresh(900, "WhatsApp", odd)}, st, thisBoot, map[uint32]bool{900: true}); len(got) != 0 {
+		t.Fatalf("two dead records with the title: got %v", got)
+	}
+}
+
 func TestBindAcrossBoots(t *testing.T) {
 	prev := left(1, "autobrr", "S2", full)
-	prev.Boot, prev.Run = thisBoot-86400, 200 // an earlier boot; a run id cannot collide across boots
+	prev.Boot = thisBoot - 86400 // an earlier boot; its id says nothing about this one
 	never := Stored{Window: 2, Bundle: "com.google.Chrome", App: "Google Chrome", Title: "Review", Placement: Placement{Space: "S3", Frame: rightHalf}}
 	two := []Seen{fresh(900, "autobrr", full), fresh(901, "Review", rightHalf)}
 	got := Bind(two, []Stored{prev, never}, thisBoot, map[uint32]bool{900: true, 901: true})

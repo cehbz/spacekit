@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -284,9 +285,9 @@ func TestDisturbanceLifecycle(t *testing.T) {
 	}
 }
 
-func seenRun(wid uint32, run int64, title, space string, f layout.Rect) arrangement.Seen {
+func seenTitled(wid uint32, title, space string, f layout.Rect) arrangement.Seen {
 	s := seen(wid, space, f)
-	s.Run, s.Title = run, title
+	s.Title = title
 	return s
 }
 
@@ -296,8 +297,8 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if n := count(t, s, `SELECT COUNT(*) FROM pragma_table_info('binding') WHERE name = 'run'`); n != 1 {
-		t.Fatalf("binding.run missing after Open")
+	if n := count(t, s, `SELECT COUNT(*) FROM pragma_table_info('binding') WHERE name = 'run'`); n != 0 {
+		t.Fatalf("binding.run present after Open")
 	}
 	s.Close()
 	s2, err := Open(path)
@@ -305,48 +306,46 @@ func TestOpenMigratesAndReopens(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer s2.Close()
-	if n := count(t, s2, `PRAGMA user_version`); n < 1 {
-		t.Fatalf("user_version = %d", n)
+	if n := count(t, s2, `PRAGMA user_version`); n != len(migrations) {
+		t.Fatalf("user_version = %d, want %d", n, len(migrations))
 	}
 }
 
-func TestAdoptRecordsTheRunAndKnownRuns(t *testing.T) {
-	s := open(t)
-	arr, _ := s.Arrangement("D1")
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenRun(42, 777, "t", "S1", full)}}); err != nil {
+func TestOpenDropsTheRunColumnKeepingBindings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v1.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	runs, err := s.KnownRuns(boot)
-	if err != nil || !runs[777] || len(runs) != 1 {
-		t.Fatalf("KnownRuns = %v, %v", runs, err)
+	for _, q := range []string{
+		schema,
+		`ALTER TABLE binding ADD COLUMN run INTEGER NOT NULL DEFAULT 0`,
+		`PRAGMA user_version = 1`,
+		`INSERT INTO window(id, bundle, app, title, first_seen) VALUES (16, 'net.whatsapp.WhatsApp', 'WhatsApp', 'WhatsApp', 0)`,
+		`INSERT INTO binding(window_id, boot, wid, run) VALUES (16, 1790000000, 149, 555)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
 	}
-	if other, _ := s.KnownRuns(boot.Add(time.Hour)); len(other) != 0 {
-		t.Fatalf("another boot knows no runs: %v", other)
-	}
-}
-
-func TestNoteRunsFillsUnknownRunsOnly(t *testing.T) {
-	s := open(t)
-	arr, _ := s.Arrangement("D1")
-	adoptNew(t, s, arr, 42, "S1", full) // seen() carries no run
-	if err := s.NoteRuns(boot, []arrangement.Seen{seenRun(42, 555, "t", "S1", full)}); err != nil {
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if n := count(t, s, `SELECT run FROM binding WHERE wid = 42`); n != 555 {
-		t.Fatalf("run = %d, want 555", n)
+	defer s.Close()
+	if n := count(t, s, `SELECT COUNT(*) FROM pragma_table_info('binding') WHERE name = 'run'`); n != 0 {
+		t.Fatalf("binding.run present after migration")
 	}
-	if err := s.NoteRuns(boot, []arrangement.Seen{seenRun(42, 999, "t", "S1", full)}); err != nil {
-		t.Fatal(err)
-	}
-	if n := count(t, s, `SELECT run FROM binding WHERE wid = 42`); n != 555 {
-		t.Fatalf("a known run must not be overwritten: %d", n)
+	if n := count(t, s, `SELECT COUNT(*) FROM binding WHERE window_id = 16 AND boot = 1790000000 AND wid = 149`); n != 1 {
+		t.Fatalf("binding lost in migration")
 	}
 }
 
 func TestStoredCarriesTheLatestBinding(t *testing.T) {
 	s := open(t)
 	arr, _ := s.Arrangement("D1")
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenRun(42, 100, "autobrr", "S2", full)}}); err != nil {
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S2", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	st, err := s.Stored(arr)
@@ -354,7 +353,7 @@ func TestStoredCarriesTheLatestBinding(t *testing.T) {
 		t.Fatalf("Stored = %+v, %v", st, err)
 	}
 	o := st[0]
-	if o.Title != "autobrr" || o.Bundle != "com.example" || o.Space != "S2" || o.Frame != full || o.Boot != boot.Unix() || o.Binding != 42 || o.Run != 100 {
+	if o.Title != "autobrr" || o.Bundle != "com.example" || o.Space != "S2" || o.Frame != full || o.Boot != boot.Unix() || o.Binding != 42 {
 		t.Fatalf("stored = %+v", o)
 	}
 }
@@ -362,11 +361,11 @@ func TestStoredCarriesTheLatestBinding(t *testing.T) {
 func TestBindGivesAStoredWindowAFreshIdAndOwesIt(t *testing.T) {
 	s := open(t)
 	arr, _ := s.Arrangement("D1")
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenRun(42, 100, "autobrr", "S2", full)}}); err != nil {
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S2", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := s.Stored(arr)
-	f := seenRun(900, 200, "autobrr - renamed", "S5", full)
+	f := seenTitled(900, "autobrr - renamed", "S5", full)
 	if err := s.Bind(arr, boot, t0.Add(time.Minute), "relaunch", []Bound{{Window: st[0].Window, Seen: f}}); err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +383,7 @@ func TestBindGivesAStoredWindowAFreshIdAndOwesIt(t *testing.T) {
 		t.Fatalf("binding must not create a window: %d", n)
 	}
 	st2, _ := s.Stored(arr)
-	if st2[0].Binding != 900 || st2[0].Run != 200 || st2[0].Title != "autobrr - renamed" {
+	if st2[0].Binding != 900 || st2[0].Title != "autobrr - renamed" {
 		t.Fatalf("latest binding and title: %+v", st2[0])
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM event WHERE kind = 'bound'`); n != 1 {
@@ -562,7 +561,7 @@ func TestOweAllOwesOnlyWindowsOnScreenEachOnce(t *testing.T) {
 	arr, _ := s.Arrangement("D1")
 	a := adoptNew(t, s, arr, 1, "S1", full)
 	adoptNew(t, s, arr, 2, "S1", full) // closed since: not among the live ids
-	if err := s.Bind(arr, boot, t0, "relaunch", []Bound{{Window: a.Window, Seen: seenRun(9, 5, "t", "S1", full)}}); err != nil {
+	if err := s.Bind(arr, boot, t0, "relaunch", []Bound{{Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Release, Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {

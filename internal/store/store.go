@@ -42,6 +42,7 @@ func Open(path string) (*Store, error) {
 // is version 0.
 var migrations = []string{
 	`ALTER TABLE binding ADD COLUMN run INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE binding DROP COLUMN run`,
 }
 
 func migrate(db *sql.DB) error {
@@ -234,7 +235,7 @@ func newWindow(tx *sql.Tx, boot, at time.Time, s arrangement.Seen) (int64, error
 		return 0, err
 	}
 	win, _ := res.LastInsertId()
-	_, err = tx.Exec(`INSERT INTO binding(window_id, boot, wid, run) VALUES (?, ?, ?, ?)`, win, boot.Unix(), s.Binding, s.Run)
+	_, err = tx.Exec(`INSERT INTO binding(window_id, boot, wid) VALUES (?, ?, ?)`, win, boot.Unix(), s.Binding)
 	return win, err
 }
 
@@ -353,11 +354,11 @@ func (s *Store) OpenDisturbances() ([]Disturbance, error) {
 }
 
 // Stored returns every window with a placement in the arrangement, with its
-// latest binding: the candidates for binding fresh ids after a relaunch.
+// latest binding: the candidates for binding fresh ids.
 func (s *Store) Stored(arr int64) ([]arrangement.Stored, error) {
 	rows, err := s.db.Query(`
 		SELECT w.id, w.bundle, w.app, w.title, p.space, p.x, p.y, p.w, p.h,
-		       COALESCE(b.boot, 0), COALESCE(b.wid, 0), COALESCE(b.run, 0)
+		       COALESCE(b.boot, 0), COALESCE(b.wid, 0)
 		FROM placement p
 		JOIN window w ON w.id = p.window_id
 		LEFT JOIN binding b ON b.rowid = (SELECT MAX(rowid) FROM binding WHERE window_id = w.id)
@@ -371,48 +372,12 @@ func (s *Store) Stored(arr int64) ([]arrangement.Stored, error) {
 	for rows.Next() {
 		var o arrangement.Stored
 		if err := rows.Scan(&o.Window, &o.Bundle, &o.App, &o.Title, &o.Space, &o.Frame.X, &o.Frame.Y, &o.Frame.W, &o.Frame.H,
-			&o.Boot, &o.Binding, &o.Run); err != nil {
+			&o.Boot, &o.Binding); err != nil {
 			return nil, err
 		}
 		out = append(out, o)
 	}
 	return out, rows.Err()
-}
-
-// KnownRuns returns the app runs that have bindings in this boot.
-func (s *Store) KnownRuns(boot time.Time) (map[int64]bool, error) {
-	rows, err := s.db.Query(`SELECT DISTINCT run FROM binding WHERE boot = ? AND run <> 0`, boot.Unix())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[int64]bool{}
-	for rows.Next() {
-		var run int64
-		if err := rows.Scan(&run); err != nil {
-			return nil, err
-		}
-		out[run] = true
-	}
-	return out, rows.Err()
-}
-
-// NoteRuns records the app run of bindings that lack one.
-func (s *Store) NoteRuns(boot time.Time, seen []arrangement.Seen) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, w := range seen {
-		if w.Run == 0 {
-			continue
-		}
-		if _, err := tx.Exec(`UPDATE binding SET run = ? WHERE boot = ? AND wid = ? AND run = 0`, w.Run, boot.Unix(), w.Binding); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
 }
 
 // Bound pairs a stored window with the fresh window that recreates it.
@@ -437,8 +402,8 @@ func (s *Store) Bind(arr int64, boot, at time.Time, cause string, bound []Bound)
 	}
 	change, _ := res.LastInsertId()
 	for _, b := range bound {
-		if _, err := tx.Exec(`INSERT OR REPLACE INTO binding(window_id, boot, wid, run) VALUES (?, ?, ?, ?)`,
-			b.Window, boot.Unix(), b.Seen.Binding, b.Seen.Run); err != nil {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO binding(window_id, boot, wid) VALUES (?, ?, ?)`,
+			b.Window, boot.Unix(), b.Seen.Binding); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE window SET title = ?, app = ? WHERE id = ?`, b.Seen.Title, b.Seen.App, b.Window); err != nil {
