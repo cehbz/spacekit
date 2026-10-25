@@ -181,6 +181,13 @@ func (w *watcher) handle(e sysevents.Event) {
 	case sysevents.ScreensWake, sysevents.SystemWake:
 		w.asleep = false
 		log.Printf("%s", e.Kind)
+	case sysevents.SessionUnlocked:
+		log.Printf("%s", e.Kind)
+		if w.boot != nil {
+			w.bootPass(e.Kind.String())
+		} else {
+			w.look(e.Kind.String())
+		}
 	}
 }
 

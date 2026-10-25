@@ -16,6 +16,7 @@ enum {
 	kSystemWake,
 	kSpaceChanged,
 	kWillPowerOff,
+	kSessionUnlocked,
 };
 
 static void observe(NSNotificationName name, int kind) {
@@ -30,6 +31,17 @@ static void observe(NSNotificationName name, int kind) {
 			if (a.localizedName) app = a.localizedName.UTF8String;
 		}
 		syseventsEmit(kind, (char *)app, 0, 0);
+	}];
+}
+
+// loginwindow posts com.apple.screenIsUnlocked when the session is unlocked.
+static void observeUnlock(void) {
+	[[NSDistributedNotificationCenter defaultCenter]
+		addObserverForName:@"com.apple.screenIsUnlocked"
+		            object:nil
+		             queue:nil
+		        usingBlock:^(NSNotification *note) {
+		syseventsEmit(kSessionUnlocked, "", 0, 0);
 	}];
 }
 
@@ -52,6 +64,7 @@ void sysevents_start(void) {
 	observe(NSWorkspaceDidWakeNotification, kSystemWake);
 	observe(NSWorkspaceActiveSpaceDidChangeNotification, kSpaceChanged);
 	observe(NSWorkspaceWillPowerOffNotification, kWillPowerOff);
+	observeUnlock();
 	CGDisplayRegisterReconfigurationCallback(displayChanged, NULL);
 }
 

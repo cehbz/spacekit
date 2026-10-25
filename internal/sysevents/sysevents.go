@@ -1,9 +1,10 @@
 // Package sysevents surfaces the macOS notifications the watcher acts on as
 // one Go channel: app launches, display reconfiguration, screen and system
-// sleep/wake, active-space changes, and logout/power-off. Delivery needs the AppKit event loop
-// on the main OS thread (see sysevents.m for why a plain run loop is not
-// enough): call Run there; it blocks until Stop. OnMain runs a function on
-// that thread, which is where SkyLight and Accessibility work belongs.
+// sleep/wake, active-space changes, logout/power-off, and session unlock.
+// Delivery needs the AppKit event loop on the main OS thread (see
+// sysevents.m for why a plain run loop is not enough): call Run there; it
+// blocks until Stop. OnMain runs a function on that thread, which is where
+// SkyLight and Accessibility work belongs.
 package sysevents
 
 /*
@@ -34,6 +35,7 @@ const (
 	SystemWake
 	SpaceChanged
 	WillPowerOff // logout, restart, or shutdown requested
+	SessionUnlocked
 )
 
 func (k Kind) String() string {
@@ -54,6 +56,8 @@ func (k Kind) String() string {
 		return "space changed"
 	case WillPowerOff:
 		return "will power off"
+	case SessionUnlocked:
+		return "session unlock"
 	}
 	return "unknown"
 }
