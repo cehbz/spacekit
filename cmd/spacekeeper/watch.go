@@ -68,6 +68,9 @@ type watcher struct {
 	onMain  func(fn func())
 	place   func(wid uint32) bool
 	send    func(wids []uint32) error
+	// sendFailing and overflowing are set while the last send failed and
+	// while the set is over watchedCap; each is logged when it is first set.
+	sendFailing, overflowing bool
 
 	boot                      *reconciler // non-nil while login convergence runs
 	bootStarted, bootActivity time.Time
@@ -213,8 +216,7 @@ func (w *watcher) handle(e sysevents.Event) {
 			w.look(e.Kind.String())
 		}
 	case sysevents.WindowAttached:
-		w.noteWindow(e)
-		if w.windowAttached(e.Window) {
+		if w.noteWindow(e) && w.windowAttached(e.Window) {
 			w.sendWatched()
 		}
 	case sysevents.WindowDetached, sysevents.WindowMoved, sysevents.WindowResized,
@@ -245,17 +247,19 @@ func (w *watcher) noteSpaces(at time.Time) {
 	w.spaces.Note(at)
 }
 
-// noteWindow records a window-server window event. One arriving while a
-// space change or a display burst is open adds nothing: the look those
-// produce covers it, and a space switch reports every window shown and
-// hidden. Window events noted before either are dropped by noteSpaces and
-// noteDisplays.
-func (w *watcher) noteWindow(e sysevents.Event) {
-	if w.spaces.Open() || w.displays.Open() {
-		return
+// noteWindow records a window-server window event and reports whether it
+// did. One arriving while a space change or a display burst is open, or
+// while login convergence holds looks, adds nothing: the look those produce
+// covers it, and a space switch reports every window shown and hidden.
+// Window events noted before a space change or a display burst are dropped
+// by noteSpaces and noteDisplays.
+func (w *watcher) noteWindow(e sysevents.Event) bool {
+	if w.spaces.Open() || w.displays.Open() || w.boot != nil {
+		return false
 	}
 	w.windows.Note(e.At)
 	w.lastWindow = e.Kind
+	return true
 }
 
 // windowAttached adds a window attached to a space to the watched set if it
@@ -267,16 +271,24 @@ func (w *watcher) windowAttached(wid uint32) bool {
 	return ok && w.watched.Attached(wid)
 }
 
-// sendWatched gives the window server the watched set.
-func (w *watcher) sendWatched() {
-	var err error
-	w.onMain(func() { err = w.send(w.watched.IDs()) })
-	if err != nil {
+// sendWatched gives the window server the watched set from the watcher
+// goroutine.
+func (w *watcher) sendWatched() { w.onMain(w.sendNow) }
+
+// sendNow gives the window server the watched set; it runs on the main
+// thread. A failing send and a set over watchedCap are logged when they
+// begin, not at every send.
+func (w *watcher) sendNow() {
+	err := w.send(w.watched.IDs())
+	if err != nil && !w.sendFailing {
 		log.Printf("requesting window notifications: %v", err)
 	}
-	if n := w.watched.Overflow(); n > 0 {
+	w.sendFailing = err != nil
+	n := w.watched.Overflow()
+	if n > 0 && !w.overflowing {
 		log.Printf("watching %d windows; %d more are left to the timer", watchedCap, n)
 	}
+	w.overflowing = n > 0
 }
 
 // --- saving ---
@@ -381,7 +393,7 @@ func (w *watcher) putOff(trigger, why string) {
 		log.Printf("look (%s) put off: %s", trigger, why)
 	}
 	w.retry = trigger
-	w.spaces.Note(time.Now())
+	w.noteSpaces(time.Now())
 }
 
 // sample observes the session's windows. It returns errOverviewOpen while
@@ -462,9 +474,7 @@ func (w *watcher) lookOnMain(trigger string, first []arrangement.Seen) (moving b
 	}
 	w.prevVisible = visible
 	w.watched.Bound(bindings(seen))
-	if err := w.send(w.watched.IDs()); err != nil {
-		log.Printf("requesting window notifications: %v", err)
-	}
+	w.sendNow()
 	logDecisions(trigger, ds)
 	return false, nil
 }

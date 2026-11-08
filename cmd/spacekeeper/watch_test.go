@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"reflect"
 	"strings"
@@ -22,7 +23,7 @@ func TestPutOffLogsOnce(t *testing.T) {
 	log.SetFlags(0)
 	defer func() { log.SetOutput(out); log.SetFlags(flags) }()
 
-	w := &watcher{spaces: settle.New(spaceQuiet)}
+	w := newTestWatcher()
 	for i := 0; i < 3; i++ {
 		w.putOff("interval", "the overview is showing")
 	}
@@ -166,5 +167,75 @@ func TestNoteDisplaysClosesWindowSettle(t *testing.T) {
 	}
 	if w.windows.Open() {
 		t.Fatal("a display event should close the window settle window")
+	}
+}
+
+// captureLog sends the log to a buffer for the rest of the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	var buf bytes.Buffer
+	out, flags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(out); log.SetFlags(flags) })
+	return &buf
+}
+
+func TestPutOffClosesWindowSettle(t *testing.T) {
+	captureLog(t)
+	w := newTestWatcher()
+	w.windows.Note(time.Now())
+	w.putOff("interval", "the overview is showing")
+	if w.windows.Open() || !w.spaces.Open() {
+		t.Fatalf("windows open %v, spaces open %v; want the space settle window only", w.windows.Open(), w.spaces.Open())
+	}
+}
+
+func TestSendLogsFailureOnce(t *testing.T) {
+	buf := captureLog(t)
+	at := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
+	w := newTestWatcher()
+	w.watched.Bound([]uint32{1, 2, 3, 4})
+	w.send = func([]uint32) error { return errors.New("symbol missing") }
+	for wid := uint32(1); wid <= 3; wid++ {
+		w.handle(sysevents.Event{Kind: sysevents.WindowDestroyed, At: at, Window: wid})
+	}
+	if n := strings.Count(buf.String(), "requesting window notifications"); n != 1 {
+		t.Fatalf("logged %d send failures, want 1:\n%s", n, buf.String())
+	}
+}
+
+func TestSendLogsOverflowOnce(t *testing.T) {
+	buf := captureLog(t)
+	at := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
+	w := newTestWatcher()
+	ids := make([]uint32, watchedCap+5)
+	for i := range ids {
+		ids[i] = uint32(i + 1)
+	}
+	w.watched.Bound(ids)
+	for wid := uint32(1); wid <= 2; wid++ {
+		w.handle(sysevents.Event{Kind: sysevents.WindowDestroyed, At: at, Window: wid})
+	}
+	if n := strings.Count(buf.String(), "left to the timer"); n != 1 {
+		t.Fatalf("logged %d overflow lines, want 1:\n%s", n, buf.String())
+	}
+}
+
+func TestHandleAttachedAbsorbedDoesNotPlace(t *testing.T) {
+	at := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
+	for name, open := range map[string]func(*watcher){
+		"space change":      func(w *watcher) { w.spaces.Note(at) },
+		"display burst":     func(w *watcher) { w.displays.Note(at) },
+		"login convergence": func(w *watcher) { w.boot = &reconciler{} },
+	} {
+		w := newTestWatcher()
+		open(w)
+		var placed, sent int
+		w.place = func(uint32) bool { placed++; return true }
+		w.send = func([]uint32) error { sent++; return nil }
+		w.handle(sysevents.Event{Kind: sysevents.WindowAttached, At: at.Add(time.Second), Window: 9, Space: 5})
+		if placed != 0 || sent != 0 || w.windows.Open() {
+			t.Errorf("%s: placed %d, sent %d, windows open %v; want the attach absorbed", name, placed, sent, w.windows.Open())
+		}
 	}
 }
