@@ -108,6 +108,14 @@ static CFDataRef sk_window_list(void) {
 	return d;
 }
 
+static CFDataRef sk_window_info(uint32_t wid) {
+	CFArrayRef arr = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, wid);
+	if (!arr) return NULL;
+	CFDataRef d = sk_plist(arr);
+	CFRelease(arr);
+	return d;
+}
+
 // Implemented in move.m.
 int sk_move_windows_to_space(const uint32_t *wids, int count, unsigned long long sid);
 char *sk_bundle_id_for_pid(int pid);
@@ -230,6 +238,27 @@ func RequestWindowNotifications(wids []uint32) error {
 		return fmt.Errorf("SLSRequestNotificationsForWindows: CGError %d", int(rc))
 	}
 	return nil
+}
+
+// ErrNotListed reports a window the window server no longer lists.
+var ErrNotListed = errors.New("window not listed")
+
+// WindowInfoFor is the window server's listing of one window. Main thread only.
+func WindowInfoFor(wid uint32) (WindowInfo, error) {
+	d := C.sk_window_info(C.uint32_t(wid))
+	if d == 0 {
+		return WindowInfo{}, errors.New("CGWindowListCopyWindowInfo failed")
+	}
+	var wins []WindowInfo
+	if err := decodeData(d, "window info", &wins); err != nil {
+		return WindowInfo{}, err
+	}
+	for _, w := range wins {
+		if w.Number == wid {
+			return w, nil
+		}
+	}
+	return WindowInfo{}, ErrNotListed
 }
 
 // WindowList returns all windows in the session, including other spaces.
