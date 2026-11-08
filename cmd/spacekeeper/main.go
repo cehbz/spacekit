@@ -358,6 +358,48 @@ type snapshot struct {
 	fsWindow map[uint32]string
 }
 
+// placeableWindow is the window-list test for a window the agent places:
+// an ordinary visible window of usable size. Membership of one user space
+// is checked separately, since it needs the space list.
+func placeableWindow(w skylight.WindowInfo) bool {
+	return w.Layer == 0 && w.Alpha != 0 && w.Bounds.Width >= 50 && w.Bounds.Height >= 50
+}
+
+// placeable reports whether the window with this id would be gathered now:
+// listed, placeableWindow, and on exactly one user space. Main thread only.
+func placeable(wid uint32) bool {
+	wins, err := skylight.WindowList()
+	if err != nil {
+		return false
+	}
+	var found *skylight.WindowInfo
+	for i := range wins {
+		if wins[i].Number == wid {
+			found = &wins[i]
+			break
+		}
+	}
+	if found == nil || !placeableWindow(*found) {
+		return false
+	}
+	ids, err := skylight.SpacesForWindow(wid)
+	if err != nil || len(ids) != 1 {
+		return false
+	}
+	displays, err := skylight.ManagedDisplaySpaces()
+	if err != nil {
+		return false
+	}
+	for _, d := range displays {
+		for _, sp := range d.Spaces {
+			if sp.ID() == ids[0] {
+				return sp.UserSpace()
+			}
+		}
+	}
+	return false
+}
+
 func gather() (*snapshot, error) {
 	displays, err := skylight.ManagedDisplaySpaces()
 	if err != nil {
@@ -407,7 +449,7 @@ func gather() (*snapshot, error) {
 	}
 	for _, w := range wins {
 		s.all = append(s.all, layout.ListedWindow{ID: w.Number, OwnerName: w.OwnerName, Title: w.Name})
-		if w.Layer != 0 || w.Alpha == 0 || w.Bounds.Width < 50 || w.Bounds.Height < 50 {
+		if !placeableWindow(w) {
 			continue
 		}
 		ids, err := skylight.SpacesForWindow(w.Number)

@@ -21,8 +21,11 @@ import (
 // WindowServer's own window-return attempts give up ~7s after the first, so
 // displayQuiet after the last callback lands after macOS has finished.
 const (
-	displayQuiet  = 10 * time.Second
-	spaceQuiet    = 3 * time.Second
+	displayQuiet = 10 * time.Second
+	spaceQuiet   = 3 * time.Second
+	// windowQuiet debounces window-server window events: a drag reports a
+	// move per frame, with gaps inside a stroke under 300 ms.
+	windowQuiet   = 500 * time.Millisecond
 	stillGap      = 400 * time.Millisecond // between the two samples of a look
 	launchDelay   = 1500 * time.Millisecond
 	sweepInterval = 15 * time.Second
@@ -45,15 +48,26 @@ type watchOptions struct {
 	frames, create, fullscreen bool
 }
 
-// watcher is the resident agent: it looks at the session on a timer and on
-// sleep and space-change events and reconciles it with the arrangement, owes
+// watcher is the resident agent: it looks at the session on a timer, on
+// sleep, space-change and window-server events, and reconciles it with the
+// arrangement, owes
 // every window after a display change, saves snapshots, and runs the login
 // convergence. All SkyLight work runs on the main thread via
 // sysevents.OnMain; this loop only decides.
 type watcher struct {
-	opt      watchOptions
-	displays *settle.Window // an open display-reconfiguration burst
-	spaces   *settle.Window // debounce for active-space changes
+	opt        watchOptions
+	displays   *settle.Window // an open display-reconfiguration burst
+	spaces     *settle.Window // debounce for active-space changes
+	windows    *settle.Window // debounce for window-server window events
+	lastWindow sysevents.Kind // the kind that last noted windows; names the look
+
+	// watched are the windows the window server reports on. place and send
+	// are the main-thread calls behind it and onMain gets them there; tests
+	// replace all three.
+	watched watched
+	onMain  func(fn func())
+	place   func(wid uint32) bool
+	send    func(wids []uint32) error
 
 	boot                      *reconciler // non-nil while login convergence runs
 	bootStarted, bootActivity time.Time
@@ -81,8 +95,12 @@ func watchCmd(o watchOptions) error {
 		return err
 	}
 	defer st.Close()
-	w := &watcher{opt: o, store: st, displays: settle.New(displayQuiet), spaces: settle.New(spaceQuiet)}
-	sysevents.Start()
+	w := &watcher{opt: o, store: st,
+		displays: settle.New(displayQuiet), spaces: settle.New(spaceQuiet), windows: settle.New(windowQuiet),
+		onMain: sysevents.OnMain, place: placeable, send: skylight.RequestWindowNotifications}
+	if err := sysevents.Start(); err != nil {
+		log.Printf("%v; looking on the timer only", err)
+	}
 	go func() {
 		w.loop()
 		sysevents.Stop()
@@ -103,12 +121,15 @@ func (w *watcher) loop() {
 	w.look("startup")
 	w.save("startup")
 	for {
-		var settled, spaceQuietC <-chan time.Time
+		var settled, spaceQuietC, windowQuietC <-chan time.Time
 		if w.displays.Open() {
 			settled = time.After(time.Until(w.displays.Deadline()))
 		}
 		if w.spaces.Open() {
 			spaceQuietC = time.After(time.Until(w.spaces.Deadline()))
+		}
+		if w.windows.Open() {
+			windowQuietC = time.After(time.Until(w.windows.Deadline()))
 		}
 		select {
 		case e := <-sysevents.Events():
@@ -135,6 +156,9 @@ func (w *watcher) loop() {
 			if trigger == "space change" {
 				w.save(trigger)
 			}
+		case <-windowQuietC:
+			w.windows.Close()
+			w.look(w.lastWindow.String())
 		}
 	}
 }
@@ -154,7 +178,7 @@ func (w *watcher) prune() {
 func (w *watcher) handle(e sysevents.Event) {
 	switch e.Kind {
 	case sysevents.DisplayReconfigured:
-		if w.displays.Note(e.At) {
+		if w.noteDisplays(e.At) {
 			log.Printf("display change began (display %d, flags %#x); looks and saves held", e.Display, e.Flags)
 			if id, err := w.store.BeginDisturbance("display", e.At); err == nil {
 				w.burst = id
@@ -170,7 +194,7 @@ func (w *watcher) handle(e sysevents.Event) {
 		w.poweringOff = true
 		log.Printf("holding looks and saves until exit")
 	case sysevents.SpaceChanged:
-		w.spaces.Note(e.At)
+		w.noteSpaces(e.At)
 	case sysevents.AppLaunched:
 		time.Sleep(launchDelay) // let the app map its windows
 		if w.boot != nil {
@@ -188,6 +212,70 @@ func (w *watcher) handle(e sysevents.Event) {
 		} else {
 			w.look(e.Kind.String())
 		}
+	case sysevents.WindowAttached:
+		w.noteWindow(e)
+		if w.windowAttached(e.Window) {
+			w.sendWatched()
+		}
+	case sysevents.WindowDetached, sysevents.WindowMoved, sysevents.WindowResized,
+		sysevents.WindowShown, sysevents.WindowHidden:
+		w.noteWindow(e)
+	case sysevents.WindowDestroyed:
+		if w.watched.Destroyed(e.Window) {
+			w.sendWatched()
+		}
+	case sysevents.SpaceCreated, sysevents.SpaceDestroyed, sysevents.SpaceSwitched:
+		w.noteSpaces(e.At)
+	}
+}
+
+// noteDisplays records a display event and reports whether it opened a
+// burst. It closes the window settle window: the look after the burst
+// covers the window events noted before it.
+func (w *watcher) noteDisplays(at time.Time) bool {
+	w.windows.Close()
+	return w.displays.Note(at)
+}
+
+// noteSpaces records a space-change event. It closes the window settle
+// window: the look after the space change covers the window events noted
+// before it.
+func (w *watcher) noteSpaces(at time.Time) {
+	w.windows.Close()
+	w.spaces.Note(at)
+}
+
+// noteWindow records a window-server window event. One arriving while a
+// space change or a display burst is open adds nothing: the look those
+// produce covers it, and a space switch reports every window shown and
+// hidden. Window events noted before either are dropped by noteSpaces and
+// noteDisplays.
+func (w *watcher) noteWindow(e sysevents.Event) {
+	if w.spaces.Open() || w.displays.Open() {
+		return
+	}
+	w.windows.Note(e.At)
+	w.lastWindow = e.Kind
+}
+
+// windowAttached adds a window attached to a space to the watched set if it
+// is placeable now; one that is not yet is picked up by the next look. It
+// reports whether the set changed.
+func (w *watcher) windowAttached(wid uint32) bool {
+	var ok bool
+	w.onMain(func() { ok = w.place(wid) })
+	return ok && w.watched.Attached(wid)
+}
+
+// sendWatched gives the window server the watched set.
+func (w *watcher) sendWatched() {
+	var err error
+	w.onMain(func() { err = w.send(w.watched.IDs()) })
+	if err != nil {
+		log.Printf("requesting window notifications: %v", err)
+	}
+	if n := w.watched.Overflow(); n > 0 {
+		log.Printf("watching %d windows; %d more are left to the timer", watchedCap, n)
 	}
 }
 
@@ -373,6 +461,10 @@ func (w *watcher) lookOnMain(trigger string, first []arrangement.Seen) (moving b
 		return false, err
 	}
 	w.prevVisible = visible
+	w.watched.Bound(bindings(seen))
+	if err := w.send(w.watched.IDs()); err != nil {
+		log.Printf("requesting window notifications: %v", err)
+	}
 	logDecisions(trigger, ds)
 	return false, nil
 }
