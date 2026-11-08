@@ -267,24 +267,6 @@ func TestRefreshTitles(t *testing.T) {
 	}
 }
 
-func TestDisturbanceLifecycle(t *testing.T) {
-	s := open(t)
-	id, err := s.BeginDisturbance("display", t0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	open1, _ := s.OpenDisturbances()
-	if len(open1) != 1 || open1[0].ID != id || open1[0].Kind != "display" || !open1[0].Began.Equal(t0) {
-		t.Fatalf("open = %+v", open1)
-	}
-	if err := s.EndDisturbance(id, t0.Add(10*time.Second)); err != nil {
-		t.Fatal(err)
-	}
-	if open2, _ := s.OpenDisturbances(); len(open2) != 0 {
-		t.Fatalf("still open: %+v", open2)
-	}
-}
-
 func seenTitled(wid uint32, title, space string, f layout.Rect) arrangement.Seen {
 	s := seen(wid, space, f)
 	s.Title = title
@@ -339,6 +321,38 @@ func TestOpenDropsTheRunColumnKeepingBindings(t *testing.T) {
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM binding WHERE window_id = 16 AND boot = 1790000000 AND wid = 149`); n != 1 {
 		t.Fatalf("binding lost in migration")
+	}
+}
+
+// A database from before the migration has the disturbance table; Open drops it.
+func TestMigrationDropsDisturbance(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v3.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		schema,
+		`CREATE TABLE IF NOT EXISTS disturbance (id INTEGER PRIMARY KEY, kind TEXT NOT NULL, began INTEGER NOT NULL, ended INTEGER)`,
+		`CREATE TABLE IF NOT EXISTS stream (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL)`,
+		`PRAGMA user_version = 3`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE name = 'disturbance'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatal("disturbance table still present")
 	}
 }
 
@@ -428,20 +442,6 @@ func TestJournalShowsWhatEachChangeDid(t *testing.T) {
 	}
 }
 
-func TestDisturbancesListsEndedAndOpen(t *testing.T) {
-	s := open(t)
-	a, _ := s.BeginDisturbance("display", t0)
-	s.EndDisturbance(a, t0.Add(12*time.Second))
-	s.BeginDisturbance("display", t0.Add(time.Hour))
-	ds, err := s.Disturbances(10)
-	if err != nil || len(ds) != 2 {
-		t.Fatalf("Disturbances = %+v, %v", ds, err)
-	}
-	if !ds[0].Ended.Equal(t0.Add(12*time.Second)) || !ds[1].Ended.IsZero() {
-		t.Fatalf("ended times: %+v", ds)
-	}
-}
-
 func TestUndoRestoresThePriorPlacementAndOwesTheWindow(t *testing.T) {
 	s := open(t)
 	arr, _ := s.Arrangement("D1")
@@ -522,9 +522,6 @@ func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 	if err := s.Apply(arr, oldBoot, old, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(2, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
-	d, _ := s.BeginDisturbance("display", old)
-	s.EndDisturbance(d, old.Add(time.Minute))
-	s.BeginDisturbance("display", t0)
 
 	n, err := s.Prune(t0.Add(-90*24*time.Hour), boot)
 	if err != nil || n != 1 {
@@ -544,9 +541,6 @@ func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM event`); n != 0 {
 		t.Fatalf("events of pruned changes are deleted: %d", n)
-	}
-	if n := count(t, s, `SELECT COUNT(*) FROM disturbance`); n != 1 {
-		t.Fatalf("the ended stale disturbance is deleted, the open one kept: %d", n)
 	}
 	if again, _ := s.Prune(t0.Add(-90*24*time.Hour), boot); again != 0 {
 		t.Fatalf("a second prune finds nothing: %d", again)

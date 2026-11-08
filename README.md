@@ -1,6 +1,6 @@
 # spacekit
 
-A macOS Spaces (Mission Control) toolkit: switch spaces from a mouse tilt wheel, and save/restore window-to-space layouts. SIP stays enabled.
+A macOS Spaces (Mission Control) toolkit: switch spaces from a mouse tilt wheel, and keep windows on their spaces across reboots and display changes. SIP stays enabled.
 
 ## spaceswitch
 
@@ -86,42 +86,26 @@ Changing a binary's signature (ad-hoc → cert, or a new cert) changes its Desig
 
 ## spacekeeper
 
-Saves window-to-space assignments and moves windows back later, after a reboot or a display reconfiguration has scattered them. SIP stays enabled.
+Keeps each window on its space and at its frame, and puts it back after a reboot or a display reconfiguration has scattered it. SIP stays enabled.
 
 ```
 go build -o spacekeeper ./cmd/spacekeeper
 
-spacekeeper save              snapshot the current layout into history
-spacekeeper list              list snapshots, newest first
-spacekeeper restore [-n]      restore the last pre-shutdown layout; -n prints the plan
-spacekeeper restore -latest   restore the newest snapshot instead
-spacekeeper restore -from ID  restore a specific snapshot (timestamp substring from `list`)
-spacekeeper restore -high-water   restore the richest retained snapshot
-spacekeeper restore -frames   also restore each window's position and size
-spacekeeper restore -create=false   skip recreating missing desktops
-spacekeeper restore -fullscreen   also re-fullscreen windows that were fullscreen
-spacekeeper show [-from ID]   print a snapshot's raw layout
-spacekeeper watch             run resident (the launchd agent): saves, wake restore, login convergence
+spacekeeper watch             run resident (the launchd agent): keep the arrangement and put windows back
 spacekeeper inspect           each window with its space, CGWindow bounds, and the frame its app reports via Accessibility
-spacekeeper log [-last N] [-v]  recent changes to the arrangement and disturbances; -v lists each window
+spacekeeper log [-last N] [-v]  recent changes to the arrangement and display disturbances; -v lists each window
 spacekeeper undo N            revert change N from the log; the agent puts the windows back at its next look
 spacekeeper owe               have the agent put every window on screen back at its recorded placement
 ```
 
-### Snapshot history
-
-`save` writes a timestamped snapshot under `~/.config/spacekeeper/snapshots/`, deduped (nothing is written when the layout is unchanged) and pruned to the last `-keep` (default 200). It captures everything, with no judgment about whether a state is "good" — so an accidental window-nuke, a disconnected monitor, or an update closing windows all get recorded, but none of them destroy earlier snapshots.
-
-`restore` defaults to the newest **settled previous-boot snapshot** — the layout as it was at the last shutdown. Snapshots taken shortly after a boot (uptime at save below `-settled`, default 10m) are skipped, so a login-time snapshot of the not-yet-reopened session — or a whole cycle of quick reboots — never becomes the thing that gets restored. `-high-water` selects the richest retained arrangement instead (ranked by display count, then window count, then recency); the richest snapshot is still pinned so pruning never deletes it. If the default pick looks wrong, `list` shows every snapshot with descriptive facts and boot tags (`[this-boot]`, `[unsettled]`) so you choose, and `restore -from <id>` or `-latest` overrides.
-
-`-frames` repositions and resizes via the Accessibility API. It only affects windows on the **currently active space** — macOS won't let AX resize a window that lives on another space, so frame restore is partial unless you run it per-space. Space assignment (the default) has no such limit. Grant the running process Accessibility for `-frames` to do anything.
+Snapshots under `~/.config/spacekeeper/snapshots/`, written by earlier versions, are no longer read and may be deleted.
 
 ### The agent
 
 `make agent-install` runs `spacekeeper watch` as a launchd agent (`bz.ceh.spacekeeper`, KeepAlive) that owns the whole lifecycle:
 
 - **Keeps an arrangement.** For each set of displays the agent records where every window belongs: its space and frame. It keeps a picture of the session from the window server's own events and judges a window half a second after the events about it stop, every window at each space change and after a display change settles; once a minute it checks the picture against the window server and logs any difference. A window that comes back under a new id after its app relaunched, or after a reboot, is bound to its record by title or frame and put back, frames included: login is this rule and nothing else. A change to a window on a space you can see is adopted as the new intent; a change to a window on a space you cannot see is not yours, so the window is put back. Differences within 3 points are ignored. The record lives in `~/.config/spacekeeper/spacekeeper.db` (SQLite); each placement keeps the period during which it was true, so the history is in the same table. History older than 90 days is deleted.
-- **Repairs after a disturbance.** A display change, a locked or sleeping session and a logout are disturbances: nothing seen during one is adopted. While Mission Control or Exposé is showing no look is taken at all, since the window list then carries thumbnail frames; the look is retried after. On Apple Silicon an external display de-registers briefly whenever the screens wake, macOS moves and shrinks windows, and Chrome often fails to bring its own back. When a display change has been quiet for 10 seconds, every window is owed its recorded placement: it is moved to its space and resized at once; a window on a hidden space is brought to the visible one for the resize and returned, each step confirmed by the window server's own report of it, since Accessibility only reaches windows on a shown space. A window seen back in place is released. One that a completed repair could not put back is released where it is and logged as `released unrepaired`. With the external display really gone, the arrangement for the remaining display set applies, and the full one returns with the display. A window that comes back under a new window-server id, whether its app restarted or rebuilt it in place, is matched to its record by title or frame and put back; a window that matches nothing is treated as new.
+- **Repairs after a disturbance.** A display change, a locked or sleeping session and a logout are disturbances: nothing seen during one is adopted. While Mission Control or Exposé is showing nothing is judged and the picture keeps its frames, since the window list then carries thumbnail frames; the picture is checked against the window server when the overview closes. On Apple Silicon an external display de-registers briefly whenever the screens wake, macOS moves and shrinks windows, and Chrome often fails to bring its own back. When a display change has been quiet for 10 seconds, every window is owed its recorded placement: it is moved to its space and resized at once; a window on a hidden space is brought to the visible one for the resize and returned, each step confirmed by the window server's own report of it, since Accessibility only reaches windows on a shown space. A window seen back in place is released. One that a completed repair could not put back is released where it is and logged as `released unrepaired`. With the external display really gone, the arrangement for the remaining display set applies, and the full one returns with the display. A window that comes back under a new window-server id, whether its app restarted or rebuilt it in place, is matched to its record by title or frame and put back; a window that matches nothing is treated as new.
 - **Records everything it sees.** Every event and every change to the arrangement is journaled for seven days; `spacekeeper log -events` reads it back.
 
 Log: `~/Library/Logs/spacekeeper/watch.log`. `make agent-uninstall` removes it. The earlier separate save and restore agents are unloaded by `agent-install`.
@@ -130,20 +114,16 @@ The read side is SkyLight introspection (`SLSCopyManagedDisplaySpaces`, `SLSCopy
 
 Spaces are identified by UUID, with a (display, position) fallback when a UUID is gone. Window IDs do not survive reboots, so windows are re-matched by app, then title, then frame proximity. Titles come from `kCGWindowName` (needs Screen Recording, covers all spaces) with an Accessibility fallback that covers the active space only; without any titles, matching uses app and frame. See [Screen Recording](#screen-recording) for the permission's quirks.
 
-If a display has fewer desktops than the saved layout (e.g. after a display was disconnected and reconnected), restore recreates the missing ones before moving windows. This is the one operation that drives Mission Control — it animates in and out, unavoidably, because there is no non-flashy, no-SIP way to create a Dock-managed space. It runs only when desktops are actually missing; disable with `-create=false`. Recreated desktops get new UUIDs, so windows resolve to them by display position.
-
-Fullscreen windows are recorded at save time and, with `-fullscreen`, restored by toggling each window's `AXFullScreen` (which recreates its dedicated space). Caveats: it works only for apps that expose a settable `AXFullScreen` (most do); macOS places the recreated fullscreen space by creation order, not at a precise slot; and the window is fullscreened on whatever display it is currently on. Run after windows have reopened. Without `-fullscreen`, such windows are matched but left alone and reported.
-
-Limitations, by design: all-spaces (sticky) windows and Split View pairs are not reconstructed (a Split View window becomes a solo fullscreen at best), and recreating a desktop on a display that is entirely gone is not possible (those windows are reported instead).
+Limitations, by design: all-spaces (sticky) windows, fullscreen windows and Split View pairs are not placed, and missing desktops are not recreated.
 
 ### Screen Recording
 
 Cross-space window titles come from `kCGWindowName`, which needs Screen Recording permission. Without it, titles are limited to an Accessibility fallback that covers only the active space, and matching falls back to app plus frame — weaker, and more likely to put a window back on the wrong space when an app has several similar windows.
 
-`save` prints a one-line note when the Screen Recording check returns false. Whether that matters depends on how `save` runs, because macOS attributes the check to the **responsible process**, not necessarily to the binary:
+macOS attributes the permission to the **responsible process**, not necessarily to the binary:
 
-- **Under the launchd agent** (`watch`), spacekeeper is its own responsible process and TCC subject, so grant Screen Recording to spacekeeper itself. This is the path that matters for restore quality, and it works.
-- **Run by hand from a terminal**, the responsible process is the terminal or shell, not spacekeeper — so the note can appear even when spacekeeper is granted. Either grant Screen Recording to the terminal app, or ignore the note and rely on the agent.
+- **Under the launchd agent** (`watch`), spacekeeper is its own responsible process and TCC subject, so grant Screen Recording to spacekeeper itself. This is the path that matters for matching quality.
+- **Run by hand from a terminal** (`inspect`, `owe`), the responsible process is the terminal or shell, not spacekeeper, so titles on other spaces are missing unless the terminal app is granted Screen Recording.
 
 Grant under System Settings → Privacy & Security → Screen & System Audio Recording. As with Accessibility, changing the signing certificate orphans the grant — remove the stale row and re-grant.
 

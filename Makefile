@@ -42,9 +42,9 @@ install: sign
 test:
 	go test ./...
 
-# The spacekeeper agent (`spacekeeper watch`): periodic and event-driven
-# snapshots, restore after a transient display drop, login convergence.
-# Replaces the earlier separate save and restore agents, which it unloads.
+# The spacekeeper agent (`spacekeeper watch`): keeps the arrangement and puts
+# windows back. Replaces the earlier separate save and restore agents, which
+# it unloads.
 LEGACY_AGENTS := bz.ceh.spacekeeper-save bz.ceh.spacekeeper-restore
 agent-install:
 	for a in $(LEGACY_AGENTS); do launchctl bootout gui/$$(id -u)/$$a 2>/dev/null; rm -f $(HOME)/Library/LaunchAgents/$$a.plist; done; true

@@ -7,7 +7,7 @@ import (
 )
 
 // bootTime returns when the current session booted, or zero if the kernel
-// won't say (callers then fall back to newest-snapshot selection).
+// won't say.
 func bootTime() time.Time {
 	tv, err := unix.SysctlTimeval("kern.boottime")
 	if err != nil {

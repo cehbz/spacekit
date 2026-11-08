@@ -1,6 +1,6 @@
 // Package store keeps the arrangement model in SQLite: windows and their
 // bindings, one arrangement per display set, system-versioned placements,
-// owed windows, and the journal of changes, events and disturbances.
+// owed windows, the journal of changes and events, and the event stream.
 package store
 
 import (
@@ -50,6 +50,7 @@ var migrations = []string{
 	  kind    TEXT    NOT NULL,
 	  payload TEXT    NOT NULL
 	); CREATE INDEX IF NOT EXISTS stream_at ON stream(at)`,
+	`DROP TABLE IF EXISTS disturbance`,
 }
 
 func migrate(db *sql.DB) error {
@@ -318,48 +319,6 @@ func (s *Store) RefreshTitles(boot time.Time, seen []arrangement.Seen) error {
 	return tx.Commit()
 }
 
-// Disturbance is a period during which the screen was not intent.
-type Disturbance struct {
-	ID    int64
-	Kind  string
-	Began time.Time
-	Ended time.Time // zero while open
-}
-
-func (s *Store) BeginDisturbance(kind string, at time.Time) (int64, error) {
-	res, err := s.db.Exec(`INSERT INTO disturbance(kind, began) VALUES (?, ?)`, kind, at.UnixMilli())
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
-}
-
-func (s *Store) EndDisturbance(id int64, at time.Time) error {
-	_, err := s.db.Exec(`UPDATE disturbance SET ended = ? WHERE id = ?`, at.UnixMilli(), id)
-	return err
-}
-
-// OpenDisturbances returns disturbances with no end: after a restart, ones
-// the agent was in the middle of.
-func (s *Store) OpenDisturbances() ([]Disturbance, error) {
-	rows, err := s.db.Query(`SELECT id, kind, began FROM disturbance WHERE ended IS NULL ORDER BY began`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Disturbance
-	for rows.Next() {
-		var d Disturbance
-		var began int64
-		if err := rows.Scan(&d.ID, &d.Kind, &began); err != nil {
-			return nil, err
-		}
-		d.Began = time.UnixMilli(began)
-		out = append(out, d)
-	}
-	return out, rows.Err()
-}
-
 // Stored returns every window with a placement in the arrangement, with its
 // latest binding: the candidates for binding fresh ids.
 func (s *Store) Stored(arr int64) ([]arrangement.Stored, error) {
@@ -522,33 +481,6 @@ func (s *Store) version(column string, change, win int64) (*arrangement.Placemen
 	return &p, nil
 }
 
-// Disturbances returns the latest disturbances, oldest first. Ended is zero
-// for one still open.
-func (s *Store) Disturbances(last int) ([]Disturbance, error) {
-	rows, err := s.db.Query(`SELECT id, kind, began, COALESCE(ended, 0) FROM disturbance ORDER BY id DESC LIMIT ?`, last)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []Disturbance
-	for rows.Next() {
-		var d Disturbance
-		var began, ended int64
-		if err := rows.Scan(&d.ID, &d.Kind, &began, &ended); err != nil {
-			return nil, err
-		}
-		d.Began = time.UnixMilli(began)
-		if ended != 0 {
-			d.Ended = time.UnixMilli(ended)
-		}
-		out = append(out, d)
-	}
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out, rows.Err()
-}
-
 // Undo reverts the placements a change opened. A window whose placement from
 // that change is still current gets back the one the change closed, or none
 // if it had none, and is owed so the agent puts it there. A window whose
@@ -626,7 +558,7 @@ func (s *Store) Undo(change int64, at time.Time) (reverted, skipped int, err err
 // Prune deletes history older than the cutoff: windows last bound in a boot
 // that began before it and not bound in the current boot, closed placement
 // versions whose closing change predates it, the events of changes that old,
-// changes nothing refers to any more, and disturbances that ended before it.
+// and changes nothing refers to any more.
 // It returns the number of closed placement versions deleted.
 func (s *Store) Prune(cutoff, boot time.Time) (int, error) {
 	tx, err := s.db.Begin()
@@ -663,9 +595,6 @@ func (s *Store) Prune(cutoff, boot time.Time) (int, error) {
 		AND id NOT IN (SELECT closed_by FROM placement WHERE closed_by IS NOT NULL)
 		AND id NOT IN (SELECT since FROM owed)
 		AND id NOT IN (SELECT change_id FROM event)`, ms); err != nil {
-		return 0, err
-	}
-	if _, err := tx.Exec(`DELETE FROM disturbance WHERE ended IS NOT NULL AND ended < ?`, ms); err != nil {
 		return 0, err
 	}
 	return int(n), tx.Commit()

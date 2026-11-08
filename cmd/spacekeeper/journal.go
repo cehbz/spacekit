@@ -16,8 +16,9 @@ func openStore() (*store.Store, error) {
 	return store.Open(filepath.Join(dataDir(), "spacekeeper.db"))
 }
 
-// logCmd prints the latest changes and disturbances, oldest first: one line
-// each, and with verbose one line per window under each change.
+// logCmd prints the latest changes and the display disturbances since the
+// first of them, oldest first: one line each, and with verbose one line per
+// window under each change.
 func logCmd(last int, verbose bool) error {
 	st, err := openStore()
 	if err != nil {
@@ -28,7 +29,13 @@ func logCmd(last int, verbose bool) error {
 	if err != nil {
 		return err
 	}
-	ds, err := st.Disturbances(last)
+	// Spans that began before the first change shown are left out; their
+	// quiet then has no began and is skipped.
+	var from time.Time
+	if len(entries) > 0 {
+		from = entries[0].At
+	}
+	spans, err := st.Stream(0, from, "display burst began", "display quiet")
 	if err != nil {
 		return err
 	}
@@ -49,15 +56,9 @@ func logCmd(last int, verbose bool) error {
 		}
 		lines = append(lines, line{e.At, text})
 	}
-	for _, d := range ds {
-		if len(entries) > 0 && d.Began.Before(entries[0].At) {
-			continue
-		}
-		dur := "still open"
-		if !d.Ended.IsZero() {
-			dur = d.Ended.Sub(d.Began).Round(time.Second).String()
-		}
-		lines = append(lines, line{d.Began, fmt.Sprintf("%s  %s disturbance, %s", d.Began.Format("2006-01-02 15:04:05"), d.Kind, dur)})
+	for _, text := range spanLines(spans) {
+		at, _ := time.ParseInLocation("2006-01-02 15:04:05", text[:19], time.Local)
+		lines = append(lines, line{at, text})
 	}
 	sort.SliceStable(lines, func(i, j int) bool { return lines[i].at.Before(lines[j].at) })
 	for _, l := range lines {
@@ -169,4 +170,33 @@ func eventsCmd(last int, since string) error {
 		fmt.Printf("%s  %-22s %s\n", r.At.Format("2006-01-02 15:04:05.000"), r.Kind, r.Payload)
 	}
 	return nil
+}
+
+// spanLines pairs display burst began with display quiet into one line per
+// span, oldest first; an unmatched began is still open.
+func spanLines(rows []store.Raw) []string {
+	var out []string
+	var open *store.Raw
+	emit := func(began store.Raw, dur string) {
+		out = append(out, fmt.Sprintf("%s  display disturbance, %s", began.At.Format("2006-01-02 15:04:05"), dur))
+	}
+	for i := range rows {
+		r := rows[i]
+		switch r.Kind {
+		case "display burst began":
+			if open != nil {
+				emit(*open, "still open")
+			}
+			open = &r
+		case "display quiet":
+			if open != nil {
+				emit(*open, r.At.Sub(open.At).Round(time.Second).String())
+				open = nil
+			}
+		}
+	}
+	if open != nil {
+		emit(*open, "still open")
+	}
+	return out
 }

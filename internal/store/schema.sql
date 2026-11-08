@@ -67,11 +67,3 @@ CREATE TABLE IF NOT EXISTS owed (
   since          INTEGER NOT NULL REFERENCES change(id),
   PRIMARY KEY (window_id, arrangement_id)
 );
-
--- Periods during which the screen was not intent.
-CREATE TABLE IF NOT EXISTS disturbance (
-  id    INTEGER PRIMARY KEY,
-  kind  TEXT    NOT NULL,
-  began INTEGER NOT NULL,
-  ended INTEGER
-);
