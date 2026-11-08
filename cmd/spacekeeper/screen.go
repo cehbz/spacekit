@@ -70,8 +70,11 @@ func (s *screen) run(ctx context.Context) {
 
 func (s *screen) handle(e event.Event) {
 	if s.pic == nil { // not started: the startup gather failed
-		if _, ok := e.(Tick); ok {
+		switch e.(type) {
+		case Tick:
 			s.reconcile("startup", false)
+		case SpaceQuiet, DisplayQuiet, event.OverviewEnded: // nothing to reconcile yet
+			s.b.Publish(Reconciled{Stamp: event.Now(), Cause: event.Name(e)})
 		}
 		return
 	}
@@ -197,16 +200,23 @@ func (s *screen) readSpaces() {
 	s.b.Publish(CurrentChanged{Stamp: event.Now(), Current: s.pic.clone()})
 }
 
-// publish emits the change and then Current, as a fresh copy.
+// publish emits Current, as a fresh copy, and then the change. Bus delivery
+// is FIFO per subscriber, so whatever a consumer publishes in reaction to the
+// change (the putter's PutEnded) reaches the model after the Current it
+// describes.
 func (s *screen) publish(c WindowChanged) {
-	s.b.Publish(c)
 	s.b.Publish(CurrentChanged{Stamp: event.Now(), Current: s.pic.clone()})
+	s.b.Publish(c)
 }
 
 // reconcile replaces Current with one gather. With report, each difference
 // is logged and published, the measure of how faithfully the events keep
 // Current; the overview state is corrected from the shield-window marker.
+// With report, Reconciled follows on every exit, after any CurrentChanged.
 func (s *screen) reconcile(why string, report bool) {
+	if report {
+		defer func() { s.b.Publish(Reconciled{Stamp: event.Now(), Cause: why}) }()
+	}
 	var fresh *snapshot
 	var err error
 	s.onMain(func() { fresh, err = s.r.gather() })
@@ -217,6 +227,9 @@ func (s *screen) reconcile(why string, report bool) {
 	marker := layout.OverviewOpen(fresh.all)
 	if s.pic == nil || !report {
 		s.overview = marker
+		if s.pic == nil && marker { // started inside the overview: the Dock said so before we listened
+			s.b.Publish(event.OverviewShown{Stamp: event.Now()})
+		}
 	} else {
 		if marker != s.overview {
 			log.Printf("screen (%s): overview marker %v, state %v; corrected", why, marker, s.overview)
@@ -239,9 +252,6 @@ func (s *screen) reconcile(why string, report bool) {
 	s.pic = fresh
 	s.request()
 	s.b.Publish(CurrentChanged{Stamp: event.Now(), Current: s.pic.clone()})
-	if report {
-		s.b.Publish(Reconciled{Stamp: event.Now(), Cause: why})
-	}
 }
 
 // differences lists what Current got wrong, one line each.

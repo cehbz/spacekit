@@ -164,15 +164,66 @@ func TestScreenCorrectsOverviewFromMarker(t *testing.T) {
 	r.pic.all = append(r.pic.all, layout.ListedWindow{ID: 99, OwnerName: "WindowManager", Title: "ExposeShieldWindow"})
 	b.Publish(Tick{Stamp: event.Now(), N: 1})
 	expectEvent(t, out, event.OverviewShown{}, time.Second) // the Dock never said so
-	expectNone(t, out, 100*time.Millisecond)                // Current is kept while the overview is open
-	r.pic.all = r.pic.all[:1]
+	expectCause(t, out, "tick")
 	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	expectCause(t, out, "tick")              // Current is kept while the overview is open
+	expectNone(t, out, 100*time.Millisecond) // and no CurrentChanged
+	r.pic.all = r.pic.all[:1]
+	b.Publish(Tick{Stamp: event.Now(), N: 3})
 	expectEvent(t, out, event.OverviewEnded{}, time.Second)
+	expectCause(t, out, "tick")
 	expectEvent(t, out, CurrentChanged{}, time.Second)
 	if e := expectEvent(t, out, Reconciled{}, time.Second).(Reconciled); e.Cause != "overview ended" {
 		t.Fatalf("cause %q", e.Cause)
 	}
 	expectNone(t, out, 150*time.Millisecond)
+}
+
+func TestScreenStartupInsideOverviewSaysSo(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	r.pic.all = append(r.pic.all, layout.ListedWindow{ID: 99, OwnerName: "WindowManager", Title: "ExposeShieldWindow"})
+	_, _, out := startScreen(t, r, event.OverviewShown{}, CurrentChanged{})
+	expectEvent(t, out, event.OverviewShown{}, time.Second)
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+}
+
+// Current goes out before the change, so whatever a consumer publishes in
+// reaction to the change reaches the model after the Current it describes.
+func TestScreenPublishesCurrentBeforeChange(t *testing.T) {
+	r := &fakeReader{pic: testPicture(), windows: map[uint32]layout.LiveWindow{
+		1: {ID: 1, OwnerPID: 10, OwnerName: "A", Title: "one", Frame: layout.Rect{X: 50, Y: 60, W: 100, H: 100}},
+	}, spaces: map[uint32][]uint64{1: {100}}}
+	b, _, out := startScreen(t, r, WindowChanged{}, CurrentChanged{})
+	expectEvent(t, out, CurrentChanged{}, time.Second) // startup
+	b.Publish(event.WindowMoved{Stamp: event.Now(), Window: 1})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	expectEvent(t, out, WindowChanged{}, time.Second)
+}
+
+// expectCause expects the next event to be Reconciled for this cause.
+func expectCause(t *testing.T, out *bus.Subscription, cause string) {
+	t.Helper()
+	if e := expectEvent(t, out, Reconciled{}, time.Second).(Reconciled); e.Cause != cause {
+		t.Fatalf("cause %q, want %q", e.Cause, cause)
+	}
+}
+
+func TestScreenReconciledAfterFailedGather(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, _, out := startScreen(t, r, CurrentChanged{}, Reconciled{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	r.gatherErrs = 1 // safe: the screen is idle after publishing
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
+	expectCause(t, out, "display quiet")
+	expectNone(t, out, 100*time.Millisecond)
+}
+
+func TestScreenQuietBeforeStartupIsReconciled(t *testing.T) {
+	r := &fakeReader{pic: testPicture(), gatherErrs: 1}
+	b, _, out := startScreen(t, r, CurrentChanged{}, Reconciled{})
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
+	expectCause(t, out, "display quiet")
+	expectNone(t, out, 100*time.Millisecond)
 }
 
 func TestScreenReconciledNamesCause(t *testing.T) {
