@@ -2,8 +2,10 @@
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #include <stdint.h>
+#include <dlfcn.h>
+#include <string.h>
 
-extern void syseventsEmit(int kind, char *name, uint32_t display, uint32_t flags);
+extern void syseventsEmit(int kind, char *name, uint32_t display, uint32_t flags, uint32_t window, uint64_t space);
 extern void syseventsMainCall(uintptr_t handle);
 
 // Must match the Kind constants in sysevents.go.
@@ -17,6 +19,16 @@ enum {
 	kSpaceChanged,
 	kWillPowerOff,
 	kSessionUnlocked,
+	kWindowAttached,
+	kWindowDetached,
+	kSpaceCreated,
+	kSpaceDestroyed,
+	kSpaceSwitched,
+	kWindowMoved,
+	kWindowResized,
+	kWindowShown,
+	kWindowHidden,
+	kWindowDestroyed,
 };
 
 static void observe(NSNotificationName name, int kind) {
@@ -30,7 +42,7 @@ static void observe(NSNotificationName name, int kind) {
 			NSRunningApplication *a = note.userInfo[NSWorkspaceApplicationKey];
 			if (a.localizedName) app = a.localizedName.UTF8String;
 		}
-		syseventsEmit(kind, (char *)app, 0, 0);
+		syseventsEmit(kind, (char *)app, 0, 0, 0, 0);
 	}];
 }
 
@@ -41,15 +53,70 @@ static void observeUnlock(void) {
 		            object:nil
 		             queue:nil
 		        usingBlock:^(NSNotification *note) {
-		syseventsEmit(kSessionUnlocked, "", 0, 0);
+		syseventsEmit(kSessionUnlocked, "", 0, 0, 0, 0);
 	}];
 }
 
 static void displayChanged(CGDirectDisplayID display, CGDisplayChangeSummaryFlags flags, void *userInfo) {
-	syseventsEmit(kDisplayReconfigured, "", display, (uint32_t)flags);
+	syseventsEmit(kDisplayReconfigured, "", display, (uint32_t)flags, 0, 0);
 }
 
-void sysevents_start(void) {
+// Window-server connection notifications, delivered on the main run loop.
+// Types and payloads were measured on macOS 26 (see the design spec):
+// 1325/1326 attach/detach carry a u64 space id then a u32 window id;
+// 1327/1328/1329 carry a u64 space id; 1401 carries nothing; the per-window
+// types carry a u32 window id.
+typedef void (*sls_notify_cb)(uint32_t type, void *data, size_t len, void *ctx, int cid);
+typedef int (*sls_cid_fn)(void);
+typedef CGError (*sls_register_fn)(int cid, sls_notify_cb cb, uint32_t type, void *ctx);
+
+static const struct { uint32_t type; int kind; } slsTypes[] = {
+	{1325, kWindowAttached}, {1326, kWindowDetached},
+	{1327, kSpaceCreated}, {1328, kSpaceDestroyed},
+	{1329, kSpaceSwitched}, {1401, kSpaceSwitched},
+	{806, kWindowMoved}, {807, kWindowResized},
+	{815, kWindowShown}, {816, kWindowHidden}, {804, kWindowDestroyed},
+};
+
+static void slsNotify(uint32_t type, void *data, size_t len, void *ctx, int cid) {
+	int kind = -1;
+	for (size_t i = 0; i < sizeof slsTypes / sizeof slsTypes[0]; i++) {
+		if (slsTypes[i].type == type) { kind = slsTypes[i].kind; break; }
+	}
+	if (kind < 0) return;
+	uint32_t window = 0;
+	uint64_t space = 0;
+	switch (type) {
+	case 1325: case 1326:
+		if (len >= 12) { memcpy(&space, data, 8); memcpy(&window, (char *)data + 8, 4); }
+		break;
+	case 1327: case 1328: case 1329:
+		if (len >= 8) memcpy(&space, data, 8);
+		break;
+	case 806: case 807: case 815: case 816: case 804:
+		if (len >= 4) memcpy(&window, data, 4);
+		break;
+	}
+	syseventsEmit(kind, "", 0, 0, window, space);
+}
+
+// Returns -1 when SkyLight or its symbols are missing, otherwise the number
+// of types whose registration failed.
+static int registerWindowServer(void) {
+	void *h = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY);
+	if (!h) return -1;
+	sls_cid_fn cidFn = (sls_cid_fn)dlsym(h, "SLSMainConnectionID");
+	sls_register_fn reg = (sls_register_fn)dlsym(h, "SLSRegisterConnectionNotifyProc");
+	if (!cidFn || !reg) return -1;
+	int cid = cidFn();
+	int failed = 0;
+	for (size_t i = 0; i < sizeof slsTypes / sizeof slsTypes[0]; i++) {
+		if (reg(cid, slsNotify, slsTypes[i].type, NULL) != kCGErrorSuccess) failed++;
+	}
+	return failed;
+}
+
+int sysevents_start(void) {
 	// NSApplication is needed even though nothing is ever shown: display
 	// reconfiguration callbacks, screens sleep/wake, and active-space changes
 	// all arrive over the SkyLight display-notification channel, which only
@@ -66,6 +133,7 @@ void sysevents_start(void) {
 	observe(NSWorkspaceWillPowerOffNotification, kWillPowerOff);
 	observeUnlock();
 	CGDisplayRegisterReconfigurationCallback(displayChanged, NULL);
+	return registerWindowServer();
 }
 
 void sysevents_run(void) { [NSApp run]; }
