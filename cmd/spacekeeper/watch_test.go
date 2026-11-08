@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cehbz/spacekit/internal/event"
 	"github.com/cehbz/spacekit/internal/settle"
 	"github.com/cehbz/spacekit/internal/skylight"
-	"github.com/cehbz/spacekit/internal/sysevents"
 )
 
 // A look put off again and again while the overview is showing is logged
@@ -52,15 +52,15 @@ func newTestWatcher() *watcher {
 func TestHandleWindowEventOpensWindowSettle(t *testing.T) {
 	w := newTestWatcher()
 	at := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
-	w.handle(sysevents.Event{Kind: sysevents.WindowMoved, At: at, Window: 42})
+	w.handle(event.WindowMoved{Stamp: event.Stamp{At: at}, Window: 42})
 	if !w.windows.Open() {
 		t.Fatal("a window move should open the window settle window")
 	}
 	if got, want := w.windows.Deadline(), at.Add(windowQuiet); !got.Equal(want) {
 		t.Fatalf("Deadline = %v, want %v", got, want)
 	}
-	if w.lastWindow != sysevents.WindowMoved {
-		t.Fatalf("lastWindow = %v, want window moved", w.lastWindow)
+	if w.lastWindow != "window moved" {
+		t.Fatalf("lastWindow = %q, want window moved", w.lastWindow)
 	}
 }
 
@@ -72,7 +72,7 @@ func TestHandleWindowEventAbsorbedDuringBurst(t *testing.T) {
 	} {
 		w := newTestWatcher()
 		open(w)
-		w.handle(sysevents.Event{Kind: sysevents.WindowResized, At: at.Add(time.Second), Window: 42})
+		w.handle(event.WindowResized{Stamp: event.Stamp{At: at.Add(time.Second)}, Window: 42})
 		if w.windows.Open() {
 			t.Fatalf("%s: a window event during the burst should add nothing", name)
 		}
@@ -87,7 +87,7 @@ func TestHandleAttachedRequestsOnlyPlaceable(t *testing.T) {
 		w.place = func(uint32) bool { return placeable }
 		var sent [][]uint32
 		w.send = func(ids []uint32) error { sent = append(sent, ids); return nil }
-		w.handle(sysevents.Event{Kind: sysevents.WindowAttached, At: at, Window: 9, Space: 5})
+		w.handle(event.WindowAttached{Stamp: event.Stamp{At: at}, Window: 9, Space: 5})
 		if !w.windows.Open() {
 			t.Fatalf("placeable=%v: an attach should open the window settle window", placeable)
 		}
@@ -107,14 +107,14 @@ func TestHandleDestroyedOpensNothing(t *testing.T) {
 	w.watched.Bound([]uint32{3, 9})
 	var sent [][]uint32
 	w.send = func(ids []uint32) error { sent = append(sent, ids); return nil }
-	w.handle(sysevents.Event{Kind: sysevents.WindowDestroyed, At: at, Window: 9})
+	w.handle(event.WindowDestroyed{Stamp: event.Stamp{At: at}, Window: 9})
 	if w.windows.Open() {
 		t.Fatal("a destroy should not open the window settle window")
 	}
 	if len(sent) != 1 || !reflect.DeepEqual(sent[0], []uint32{3}) {
 		t.Fatalf("sent %v, want one request for [3]", sent)
 	}
-	w.handle(sysevents.Event{Kind: sysevents.WindowDestroyed, At: at, Window: 77})
+	w.handle(event.WindowDestroyed{Stamp: event.Stamp{At: at}, Window: 77})
 	if len(sent) != 1 {
 		t.Fatalf("destroying an unknown window re-sent: %v", sent)
 	}
@@ -122,11 +122,12 @@ func TestHandleDestroyedOpensNothing(t *testing.T) {
 
 func TestHandleSpaceEventsJoinSpaceSettle(t *testing.T) {
 	at := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
-	for _, k := range []sysevents.Kind{sysevents.SpaceCreated, sysevents.SpaceDestroyed, sysevents.SpaceSwitched} {
+	s := event.Stamp{At: at}
+	for _, k := range []event.Event{event.SpaceCreated{Stamp: s, Space: 5}, event.SpaceDestroyed{Stamp: s, Space: 5}, event.SpaceSwitched{Stamp: s}} {
 		w := newTestWatcher()
-		w.handle(sysevents.Event{Kind: k, At: at, Space: 5})
+		w.handle(k)
 		if !w.spaces.Open() || w.windows.Open() {
-			t.Fatalf("%v: spaces open %v, windows open %v; want the space settle window only", k, w.spaces.Open(), w.windows.Open())
+			t.Fatalf("%s: spaces open %v, windows open %v; want the space settle window only", event.Name(k), w.spaces.Open(), w.windows.Open())
 		}
 	}
 }
@@ -151,8 +152,8 @@ func TestPlaceableWindow(t *testing.T) {
 func TestHandleSpaceEventClosesWindowSettle(t *testing.T) {
 	at := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
 	w := newTestWatcher()
-	w.handle(sysevents.Event{Kind: sysevents.WindowMoved, At: at, Window: 42})
-	w.handle(sysevents.Event{Kind: sysevents.SpaceSwitched, At: at.Add(100 * time.Millisecond)})
+	w.handle(event.WindowMoved{Stamp: event.Stamp{At: at}, Window: 42})
+	w.handle(event.SpaceSwitched{Stamp: event.Stamp{At: at.Add(100 * time.Millisecond)}})
 	if w.windows.Open() || !w.spaces.Open() {
 		t.Fatalf("windows open %v, spaces open %v; want the space settle window only", w.windows.Open(), w.spaces.Open())
 	}
@@ -197,7 +198,7 @@ func TestSendLogsFailureOnce(t *testing.T) {
 	w.watched.Bound([]uint32{1, 2, 3, 4})
 	w.send = func([]uint32) error { return errors.New("symbol missing") }
 	for wid := uint32(1); wid <= 3; wid++ {
-		w.handle(sysevents.Event{Kind: sysevents.WindowDestroyed, At: at, Window: wid})
+		w.handle(event.WindowDestroyed{Stamp: event.Stamp{At: at}, Window: wid})
 	}
 	if n := strings.Count(buf.String(), "requesting window notifications"); n != 1 {
 		t.Fatalf("logged %d send failures, want 1:\n%s", n, buf.String())
@@ -214,7 +215,7 @@ func TestSendLogsOverflowOnce(t *testing.T) {
 	}
 	w.watched.Bound(ids)
 	for wid := uint32(1); wid <= 2; wid++ {
-		w.handle(sysevents.Event{Kind: sysevents.WindowDestroyed, At: at, Window: wid})
+		w.handle(event.WindowDestroyed{Stamp: event.Stamp{At: at}, Window: wid})
 	}
 	if n := strings.Count(buf.String(), "left to the timer"); n != 1 {
 		t.Fatalf("logged %d overflow lines, want 1:\n%s", n, buf.String())
@@ -233,7 +234,7 @@ func TestHandleAttachedAbsorbedDoesNotPlace(t *testing.T) {
 		var placed, sent int
 		w.place = func(uint32) bool { placed++; return true }
 		w.send = func([]uint32) error { sent++; return nil }
-		w.handle(sysevents.Event{Kind: sysevents.WindowAttached, At: at.Add(time.Second), Window: 9, Space: 5})
+		w.handle(event.WindowAttached{Stamp: event.Stamp{At: at.Add(time.Second)}, Window: 9, Space: 5})
 		if placed != 0 || sent != 0 || w.windows.Open() {
 			t.Errorf("%s: placed %d, sent %d, windows open %v; want the attach absorbed", name, placed, sent, w.windows.Open())
 		}

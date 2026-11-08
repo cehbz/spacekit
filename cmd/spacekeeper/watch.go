@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cehbz/spacekit/internal/arrangement"
+	"github.com/cehbz/spacekit/internal/event"
 	"github.com/cehbz/spacekit/internal/layout"
 	"github.com/cehbz/spacekit/internal/settle"
 	"github.com/cehbz/spacekit/internal/skylight"
@@ -59,7 +60,8 @@ type watcher struct {
 	displays   *settle.Window // an open display-reconfiguration burst
 	spaces     *settle.Window // debounce for active-space changes
 	windows    *settle.Window // debounce for window-server window events
-	lastWindow sysevents.Kind // the kind that last noted windows; names the look
+	lastWindow string         // name of the event that last noted windows; names the look
+	events     chan event.Event
 
 	// watched are the windows the window server reports on. place and send
 	// are the main-thread calls behind it and onMain gets them there; tests
@@ -101,7 +103,13 @@ func watchCmd(o watchOptions) error {
 	w := &watcher{opt: o, store: st,
 		displays: settle.New(displayQuiet), spaces: settle.New(spaceQuiet), windows: settle.New(windowQuiet),
 		onMain: sysevents.OnMain, place: placeable, send: skylight.RequestWindowNotifications}
-	if err := sysevents.Start(); err != nil {
+	w.events = make(chan event.Event, 64)
+	if err := sysevents.Start(func(e event.Event) {
+		select {
+		case w.events <- e:
+		default:
+		}
+	}); err != nil {
 		log.Printf("%v; looking on the timer only", err)
 	}
 	go func() {
@@ -135,7 +143,7 @@ func (w *watcher) loop() {
 			windowQuietC = time.After(time.Until(w.windows.Deadline()))
 		}
 		select {
-		case e := <-sysevents.Events():
+		case e := <-w.events:
 			w.handle(e)
 		case <-tick.C:
 			w.look("interval")
@@ -161,7 +169,7 @@ func (w *watcher) loop() {
 			}
 		case <-windowQuietC:
 			w.windows.Close()
-			w.look(w.lastWindow.String())
+			w.look(w.lastWindow)
 		}
 	}
 }
@@ -178,55 +186,58 @@ func (w *watcher) prune() {
 	}
 }
 
-func (w *watcher) handle(e sysevents.Event) {
-	switch e.Kind {
-	case sysevents.DisplayReconfigured:
-		if w.noteDisplays(e.At) {
+func (w *watcher) handle(e event.Event) {
+	switch e := e.(type) {
+	case event.DisplayReconfigured:
+		if w.noteDisplays(e.When()) {
 			log.Printf("display change began (display %d, flags %#x); looks and saves held", e.Display, e.Flags)
-			if id, err := w.store.BeginDisturbance("display", e.At); err == nil {
+			if id, err := w.store.BeginDisturbance("display", e.When()); err == nil {
 				w.burst = id
 			}
 		}
-	case sysevents.ScreensSleep, sysevents.SystemWillSleep:
-		w.look(e.Kind.String())
-		w.save(e.Kind.String())
+	case event.ScreensSlept, event.SystemSleeping:
+		w.look(event.Name(e))
+		w.save(event.Name(e))
 		w.asleep = true
-	case sysevents.WillPowerOff:
-		w.look(e.Kind.String())
-		w.save(e.Kind.String())
+	case event.PoweringOff:
+		w.look(event.Name(e))
+		w.save(event.Name(e))
 		w.poweringOff = true
 		log.Printf("holding looks and saves until exit")
-	case sysevents.SpaceChanged:
-		w.noteSpaces(e.At)
-	case sysevents.AppLaunched:
+	case event.SpaceSwitched:
+		w.noteSpaces(e.When())
+	case event.AppLaunched:
 		time.Sleep(launchDelay) // let the app map its windows
 		if w.boot != nil {
 			w.bootPass(e.Name + " launched")
 		} else {
 			w.look(e.Name + " launched")
 		}
-	case sysevents.ScreensWake, sysevents.SystemWake:
+	case event.ScreensWoke, event.SystemWoke:
 		w.asleep = false
-		log.Printf("%s", e.Kind)
-	case sysevents.SessionUnlocked:
-		log.Printf("%s", e.Kind)
+		log.Printf("%s", event.Name(e))
+	case event.SessionUnlocked:
+		log.Printf("%s", event.Name(e))
 		if w.boot != nil {
-			w.bootPass(e.Kind.String())
+			w.bootPass(event.Name(e))
 		} else {
-			w.look(e.Kind.String())
+			w.look(event.Name(e))
 		}
-	case sysevents.WindowAttached:
+	case event.SessionLocked:
+		log.Printf("%s", event.Name(e))
+	case event.WindowAttached:
 		if w.noteWindow(e) && w.windowAttached(e.Window) {
 			w.sendWatched()
 		}
-	case sysevents.WindowDetached, sysevents.WindowMoved, sysevents.WindowResized:
+	case event.WindowDetached, event.WindowMoved, event.WindowResized:
 		w.noteWindow(e)
-	case sysevents.WindowDestroyed:
+	case event.WindowDestroyed:
 		if w.watched.Destroyed(e.Window) {
 			w.sendWatched()
 		}
-	case sysevents.SpaceCreated, sysevents.SpaceDestroyed, sysevents.SpaceSwitched:
-		w.noteSpaces(e.At)
+	case event.SpaceCreated, event.SpaceDestroyed:
+		w.noteSpaces(e.When())
+	case event.OverviewShown, event.OverviewEnded:
 	}
 }
 
@@ -252,12 +263,12 @@ func (w *watcher) noteSpaces(at time.Time) {
 // covers it.
 // Window events noted before a space change or a display burst are dropped
 // by noteSpaces and noteDisplays.
-func (w *watcher) noteWindow(e sysevents.Event) bool {
+func (w *watcher) noteWindow(e event.Event) bool {
 	if w.spaces.Open() || w.displays.Open() || w.boot != nil {
 		return false
 	}
-	w.windows.Note(e.At)
-	w.lastWindow = e.Kind
+	w.windows.Note(e.When())
+	w.lastWindow = event.Name(e)
 	return true
 }
 

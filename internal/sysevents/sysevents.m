@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <ApplicationServices/ApplicationServices.h>
 #include <stdint.h>
 #include <dlfcn.h>
 #include <string.h>
@@ -8,7 +9,7 @@
 extern void syseventsEmit(int kind, char *name, uint32_t display, uint32_t flags, uint32_t window, uint64_t space);
 extern void syseventsMainCall(uintptr_t handle);
 
-// Must match the Kind constants in sysevents.go.
+// Must match kindNames in sysevents.go.
 enum {
 	kAppLaunched,
 	kDisplayReconfigured,
@@ -19,6 +20,7 @@ enum {
 	kSpaceChanged,
 	kWillPowerOff,
 	kSessionUnlocked,
+	kSessionLocked,
 	kWindowAttached,
 	kWindowDetached,
 	kSpaceCreated,
@@ -27,7 +29,11 @@ enum {
 	kWindowMoved,
 	kWindowResized,
 	kWindowDestroyed,
+	kOverviewShown,
+	kOverviewEnded,
 };
+
+static int observeDock(void);
 
 static void observe(NSNotificationName name, int kind) {
 	[[[NSWorkspace sharedWorkspace] notificationCenter]
@@ -39,18 +45,21 @@ static void observe(NSNotificationName name, int kind) {
 		if (kind == kAppLaunched) {
 			NSRunningApplication *a = note.userInfo[NSWorkspaceApplicationKey];
 			if (a.localizedName) app = a.localizedName.UTF8String;
+			if ([a.bundleIdentifier isEqualToString:@"com.apple.dock"]) {
+				dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC), dispatch_get_main_queue(), ^{ observeDock(); });
+			}
 		}
 		syseventsEmit(kind, (char *)app, 0, 0, 0, 0);
 	}];
 }
 
-// loginwindow posts com.apple.screenIsUnlocked when the session is unlocked.
-static void observeUnlock(void) {
-	[[NSDistributedNotificationCenter defaultCenter]
-		addObserverForName:@"com.apple.screenIsUnlocked"
-		            object:nil
-		             queue:nil
-		        usingBlock:^(NSNotification *note) {
+// loginwindow posts com.apple.screenIsLocked and com.apple.screenIsUnlocked.
+static void observeLock(void) {
+	NSDistributedNotificationCenter *c = [NSDistributedNotificationCenter defaultCenter];
+	[c addObserverForName:@"com.apple.screenIsLocked" object:nil queue:nil usingBlock:^(NSNotification *note) {
+		syseventsEmit(kSessionLocked, "", 0, 0, 0, 0);
+	}];
+	[c addObserverForName:@"com.apple.screenIsUnlocked" object:nil queue:nil usingBlock:^(NSNotification *note) {
 		syseventsEmit(kSessionUnlocked, "", 0, 0, 0, 0);
 	}];
 }
@@ -62,8 +71,8 @@ static void displayChanged(CGDirectDisplayID display, CGDisplayChangeSummaryFlag
 // Window-server connection notifications, delivered on the main run loop.
 // Types and payloads were measured on macOS 26 (see the design spec):
 // 1325/1326 attach/detach carry a u64 space id then a u32 window id;
-// 1327/1328/1329 carry a u64 space id; 1401 carries nothing; the per-window
-// types carry a u32 window id.
+// 1327/1328/1329 carry a u64 space id; 1401 carries nothing; 806/807/804
+// carry a u32 window id.
 typedef void (*sls_notify_cb)(uint32_t type, void *data, size_t len, void *ctx, int cid);
 typedef int (*sls_cid_fn)(void);
 typedef CGError (*sls_register_fn)(int cid, sls_notify_cb cb, uint32_t type, void *ctx);
@@ -129,10 +138,41 @@ int sysevents_start(void) {
 	observe(NSWorkspaceDidWakeNotification, kSystemWake);
 	observe(NSWorkspaceActiveSpaceDidChangeNotification, kSpaceChanged);
 	observe(NSWorkspaceWillPowerOffNotification, kWillPowerOff);
-	observeUnlock();
+	observeLock();
 	CGDisplayRegisterReconfigurationCallback(displayChanged, NULL);
 	return registerWindowServer();
 }
+
+static AXObserverRef dockObserver = NULL;
+
+static void dockNotify(AXObserverRef o, AXUIElementRef el, CFStringRef name, void *ctx) {
+	int kind = CFEqual(name, CFSTR("AXExposeExit")) ? kOverviewEnded : kOverviewShown;
+	syseventsEmit(kind, "", 0, 0, 0, 0);
+}
+
+// Returns -1 with no Dock or no observer, else the count of notifications
+// that failed to register. Replaces any earlier observer.
+static int observeDock(void) {
+	if (dockObserver) {
+		CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(dockObserver), kCFRunLoopCommonModes);
+		CFRelease(dockObserver);
+		dockObserver = NULL;
+	}
+	NSArray *docks = [NSRunningApplication runningApplicationsWithBundleIdentifier:@"com.apple.dock"];
+	if (docks.count == 0) return -1;
+	pid_t pid = [docks[0] processIdentifier];
+	if (AXObserverCreate(pid, dockNotify, &dockObserver) != kAXErrorSuccess) { dockObserver = NULL; return -1; }
+	AXUIElementRef dock = AXUIElementCreateApplication(pid);
+	int failed = 0;
+	for (NSString *n in @[@"AXExposeShowAllWindows", @"AXExposeShowFrontWindows", @"AXExposeShowDesktop", @"AXExposeExit"]) {
+		if (AXObserverAddNotification(dockObserver, dock, (__bridge CFStringRef)n, NULL) != kAXErrorSuccess) failed++;
+	}
+	CFRelease(dock);
+	CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(dockObserver), kCFRunLoopCommonModes);
+	return failed;
+}
+
+int sysevents_observe_dock(void) { return observeDock(); }
 
 void sysevents_run(void) { [NSApp run]; }
 

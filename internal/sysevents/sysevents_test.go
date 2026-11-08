@@ -2,34 +2,18 @@ package sysevents
 
 import (
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/cehbz/spacekit/internal/event"
 )
 
-func TestSessionUnlockedString(t *testing.T) {
-	if got, want := SessionUnlocked.String(), "session unlock"; got != want {
-		t.Errorf("SessionUnlocked.String() = %q, want %q", got, want)
-	}
-}
-
-// The Go constants and the enum in sysevents.m are the same list in the same
+// The Go kind list and the enum in sysevents.m are the same list in the same
 // order; this test is the one place the duplication is checked.
 func TestKindsMatchObjCEnum(t *testing.T) {
-	want := []string{
-		"kAppLaunched", "kDisplayReconfigured", "kScreensSleep", "kScreensWake",
-		"kSystemWillSleep", "kSystemWake", "kSpaceChanged", "kWillPowerOff", "kSessionUnlocked",
-		"kWindowAttached", "kWindowDetached", "kSpaceCreated", "kSpaceDestroyed", "kSpaceSwitched",
-		"kWindowMoved", "kWindowResized", "kWindowDestroyed",
-	}
-	if got := int(WindowDestroyed) + 1; got != len(want) {
-		t.Fatalf("Go declares %d kinds, the test lists %d", got, len(want))
-	}
-	for i := range want {
-		if Kind(i).String() == "unknown" {
-			t.Errorf("Kind(%d) has no String", i)
-		}
-	}
 	src, err := os.ReadFile("sysevents.m")
 	if err != nil {
 		t.Fatal(err)
@@ -44,22 +28,47 @@ func TestKindsMatchObjCEnum(t *testing.T) {
 			got = append(got, f)
 		}
 	}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("sysevents.m enum:\n%v\nwant:\n%v", got, want)
+	if strings.Join(got, " ") != strings.Join(kindNames, " ") {
+		t.Fatalf("sysevents.m enum:\n%v\nwant:\n%v", got, kindNames)
+	}
+	for i := range kindNames {
+		if typed(i, event.Stamp{}, "", 0, 0, 0, 0) == nil {
+			t.Errorf("kind %s (%d) produces no event", kindNames[i], i)
+		}
 	}
 }
 
-func TestWindowKindStrings(t *testing.T) {
-	cases := map[Kind]string{
-		WindowAttached: "window attached", WindowDetached: "window detached",
-		SpaceCreated: "space created", SpaceDestroyed: "space destroyed", SpaceSwitched: "space switched",
-		WindowMoved: "window moved", WindowResized: "window resized",
-		WindowDestroyed: "window destroyed",
+func TestTypedPayloads(t *testing.T) {
+	at := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	s := event.Stamp{At: at}
+	cases := []struct {
+		kind int
+		want event.Event
+	}{
+		{kAppLaunched, event.AppLaunched{Stamp: s, Name: "Finder"}},
+		{kDisplayReconfigured, event.DisplayReconfigured{Stamp: s, Display: 1, Flags: 2}},
+		{kSpaceChanged, event.SpaceSwitched{Stamp: s}},
+		{kSpaceSwitched, event.SpaceSwitched{Stamp: s}},
+		{kWindowAttached, event.WindowAttached{Stamp: s, Window: 7, Space: 9}},
+		{kWindowMoved, event.WindowMoved{Stamp: s, Window: 7}},
+		{kSessionLocked, event.SessionLocked{Stamp: s}},
+		{kOverviewEnded, event.OverviewEnded{Stamp: s}},
 	}
-	for k, want := range cases {
-		if got := k.String(); got != want {
-			t.Errorf("Kind(%d).String() = %q, want %q", int(k), got, want)
+	for _, c := range cases {
+		got := typed(c.kind, s, "Finder", 1, 2, 7, 9)
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("typed(%d) = %#v, want %#v", c.kind, got, c.want)
 		}
+	}
+}
+
+func TestEmitReachesSink(t *testing.T) {
+	var got []event.Event
+	setSink(func(e event.Event) { got = append(got, e) })
+	defer setSink(nil)
+	emit(event.WindowMoved{Stamp: event.Now(), Window: 7})
+	if len(got) != 1 || got[0].(event.WindowMoved).Window != 7 {
+		t.Fatalf("sink got %+v", got)
 	}
 }
 
@@ -72,5 +81,17 @@ func TestStartErr(t *testing.T) {
 	}
 	if err := startErr(3); err == nil || !strings.Contains(err.Error(), "3") {
 		t.Fatalf("startErr(3) = %v, want an error naming the count", err)
+	}
+}
+
+func TestObserveDockErr(t *testing.T) {
+	if err := observeDockErr(0); err != nil {
+		t.Fatalf("0 = %v, want nil", err)
+	}
+	if err := observeDockErr(-1); err == nil || !strings.Contains(err.Error(), "Dock") {
+		t.Fatalf("-1 = %v, want an error naming the Dock", err)
+	}
+	if err := observeDockErr(2); err == nil || !strings.Contains(err.Error(), "2") {
+		t.Fatalf("2 = %v, want the count", err)
 	}
 }
