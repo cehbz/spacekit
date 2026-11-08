@@ -60,8 +60,6 @@ flags (after the command):
   -create   restore: recreate missing desktops via Mission Control, default on (-create=false to skip)
   -fullscreen  restore: re-fullscreen windows that were fullscreen when saved
   -interval D  watch: look interval (default 1m); snapshots are saved every third look
-  -boot        watch: run login convergence even if this boot already has snapshots
-  -boot-cap D  watch: hard cap on login convergence (default 10m)
   -last N   log: how many changes to show (default 20)
   -v        log: one line per window under each change
   -events   log: the raw event stream instead of changes
@@ -88,8 +86,6 @@ func main() {
 	create := fs.Bool("create", true, "recreate missing spaces via Mission Control (flashy)")
 	fullscreen := fs.Bool("fullscreen", false, "re-fullscreen windows that were fullscreen at save time")
 	interval := fs.Duration("interval", time.Minute, "watch: look interval; snapshots are saved every third look")
-	forceBoot := fs.Bool("boot", false, "watch: run login convergence even if this boot already has snapshots")
-	bootCap := fs.Duration("boot-cap", 10*time.Minute, "watch: hard cap on login convergence")
 	last := fs.Int("last", 20, "log: changes to show")
 	verbose := fs.Bool("v", false, "log: per-window lines")
 	events := fs.Bool("events", false, "log: the raw event stream instead of changes")
@@ -135,10 +131,7 @@ func main() {
 		sysevents.Run()
 		err = <-errc
 	case "watch":
-		err = watchCmd(watchOptions{
-			interval: *interval, settle: *settled, bootCap: *bootCap, forceBoot: *forceBoot,
-			keep: *keep, frames: *frames, create: *create, fullscreen: *fullscreen,
-		})
+		err = watchCmd(watchOptions{interval: *interval})
 	default:
 		usage()
 	}
