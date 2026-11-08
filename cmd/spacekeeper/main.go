@@ -408,19 +408,14 @@ func placeable(wid uint32) bool {
 	return false
 }
 
-func gather() (*snapshot, error) {
-	displays, err := skylight.ManagedDisplaySpaces()
-	if err != nil {
-		return nil, err
-	}
-	s := &snapshot{
-		winSpace:  make(map[uint32]uint64),
-		idToKey:   make(map[uint64]string),
-		current:   make(map[uint64]bool),
-		currentOf: make(map[string]uint64),
-		fsSpace:   make(map[uint64]string),
-		fsWindow:  make(map[uint32]string),
-	}
+// setSpaces rebuilds the space-list fields from the window server's display
+// list; the window fields are left alone.
+func (s *snapshot) setSpaces(displays []skylight.Display) {
+	s.spaces, s.displays = nil, nil
+	s.idToKey = make(map[uint64]string)
+	s.current = make(map[uint64]bool)
+	s.currentOf = make(map[string]uint64)
+	s.fsSpace = make(map[uint64]string)
 	for _, d := range displays {
 		cur := layout.CurrentDisplay{UUID: d.UUID}
 		s.current[d.CurrentSpace.ID()] = true
@@ -439,6 +434,22 @@ func gather() (*snapshot, error) {
 		}
 		s.displays = append(s.displays, cur)
 	}
+}
+
+func gather() (*snapshot, error) {
+	displays, err := skylight.ManagedDisplaySpaces()
+	if err != nil {
+		return nil, err
+	}
+	s := &snapshot{
+		winSpace:  make(map[uint32]uint64),
+		idToKey:   make(map[uint64]string),
+		current:   make(map[uint64]bool),
+		currentOf: make(map[string]uint64),
+		fsSpace:   make(map[uint64]string),
+		fsWindow:  make(map[uint32]string),
+	}
+	s.setSpaces(displays)
 
 	wins, err := skylight.WindowList()
 	if err != nil {
@@ -836,4 +847,68 @@ func printSummary(l layout.Layout, st passStats, frames, fullscreen, dryRun bool
 	if st.moved > 0 && st.verified < st.moved {
 		fmt.Fprintln(os.Stderr, "warning: some moves did not verify — the bridged-move API may be restricted on this macOS build")
 	}
+}
+
+// clone is a deep copy: the screen publishes Current by value.
+func (s *snapshot) clone() *snapshot {
+	c := &snapshot{
+		spaces:    append([]layout.SavedSpace(nil), s.spaces...),
+		displays:  make([]layout.CurrentDisplay, len(s.displays)),
+		windows:   append([]layout.LiveWindow(nil), s.windows...),
+		all:       append([]layout.ListedWindow(nil), s.all...),
+		winSpace:  make(map[uint32]uint64, len(s.winSpace)),
+		idToKey:   make(map[uint64]string, len(s.idToKey)),
+		current:   make(map[uint64]bool, len(s.current)),
+		currentOf: make(map[string]uint64, len(s.currentOf)),
+		fsSpace:   make(map[uint64]string, len(s.fsSpace)),
+		fsWindow:  make(map[uint32]string, len(s.fsWindow)),
+	}
+	for i, d := range s.displays {
+		c.displays[i] = layout.CurrentDisplay{UUID: d.UUID, Spaces: append([]layout.CurrentSpace(nil), d.Spaces...)}
+	}
+	for k, v := range s.winSpace {
+		c.winSpace[k] = v
+	}
+	for k, v := range s.idToKey {
+		c.idToKey[k] = v
+	}
+	for k, v := range s.current {
+		c.current[k] = v
+	}
+	for k, v := range s.currentOf {
+		c.currentOf[k] = v
+	}
+	for k, v := range s.fsSpace {
+		c.fsSpace[k] = v
+	}
+	for k, v := range s.fsWindow {
+		c.fsWindow[k] = v
+	}
+	return c
+}
+
+// errNotPlaceable is a window the server lists but the agent does not place.
+var errNotPlaceable = errors.New("window not placeable")
+
+// readWindow lists one window with its title and spaces. Main thread only.
+// A window that is not placeable reads as errNotPlaceable.
+func readWindow(wid uint32) (layout.LiveWindow, []uint64, error) {
+	w, err := skylight.WindowInfoFor(wid)
+	if err != nil {
+		return layout.LiveWindow{}, nil, err
+	}
+	if !placeableWindow(w) {
+		return layout.LiveWindow{}, nil, errNotPlaceable
+	}
+	ids, err := skylight.SpacesForWindow(wid)
+	if err != nil {
+		return layout.LiveWindow{}, nil, err
+	}
+	title := w.Name
+	if title == "" {
+		title = skylight.WindowTitlesForPID(w.OwnerPID)[wid]
+	}
+	return layout.LiveWindow{ID: wid, OwnerPID: w.OwnerPID, BundleID: skylight.BundleIDForPID(w.OwnerPID),
+		OwnerName: w.OwnerName, Title: title,
+		Frame: layout.Rect{X: w.Bounds.X, Y: w.Bounds.Y, W: w.Bounds.Width, H: w.Bounds.Height}}, ids, nil
 }

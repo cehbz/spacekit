@@ -5,15 +5,14 @@ import "sort"
 // watchedCap is how many windows SLSRequestNotificationsForWindows accepts.
 const watchedCap = 1024
 
-// watched is the set of windows the agent asks the window server to report
-// on: the windows the last look bound, plus windows attached to a space
-// since, minus windows destroyed since. The zero value is an empty set.
+// watched is the window server's per-window request set, owned by the screen.
+// The zero value is an empty set.
 type watched struct {
 	ids map[uint32]bool
 }
 
-// Bound replaces the set with the windows a look bound.
-func (s *watched) Bound(wids []uint32) {
+// Set replaces the set with these windows.
+func (s *watched) Set(wids []uint32) {
 	s.ids = make(map[uint32]bool, len(wids))
 	for _, w := range wids {
 		s.ids[w] = true

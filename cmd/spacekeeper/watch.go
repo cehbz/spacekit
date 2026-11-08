@@ -483,7 +483,7 @@ func (w *watcher) lookOnMain(trigger string, first []arrangement.Seen) (moving b
 		return false, err
 	}
 	w.prevVisible = visible
-	w.watched.Bound(bindings(seen))
+	w.watched.Set(bindings(seen))
 	w.sendNow()
 	logDecisions(trigger, ds)
 	return false, nil

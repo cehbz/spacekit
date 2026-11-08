@@ -48,6 +48,15 @@ type Difference struct {
 	Text string
 }
 
+// Reconciled follows the CurrentChanged a reconciliation published, naming
+// what caused it (event.Name of the Tick, SpaceQuiet, DisplayQuiet or
+// OverviewEnded), so a consumer can act on the Current that reconciliation
+// produced rather than on the event that triggered it.
+type Reconciled struct {
+	event.Stamp
+	Cause string
+}
+
 // TargetChanged is one change to Target: a judgement's decisions.
 type TargetChanged struct {
 	event.Stamp

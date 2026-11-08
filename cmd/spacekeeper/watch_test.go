@@ -83,7 +83,7 @@ func TestHandleAttachedRequestsOnlyPlaceable(t *testing.T) {
 	at := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
 	for _, placeable := range []bool{true, false} {
 		w := newTestWatcher()
-		w.watched.Bound([]uint32{3})
+		w.watched.Set([]uint32{3})
 		w.place = func(uint32) bool { return placeable }
 		var sent [][]uint32
 		w.send = func(ids []uint32) error { sent = append(sent, ids); return nil }
@@ -104,7 +104,7 @@ func TestHandleAttachedRequestsOnlyPlaceable(t *testing.T) {
 func TestHandleDestroyedOpensNothing(t *testing.T) {
 	at := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
 	w := newTestWatcher()
-	w.watched.Bound([]uint32{3, 9})
+	w.watched.Set([]uint32{3, 9})
 	var sent [][]uint32
 	w.send = func(ids []uint32) error { sent = append(sent, ids); return nil }
 	w.handle(event.WindowDestroyed{Stamp: event.Stamp{At: at}, Window: 9})
@@ -195,7 +195,7 @@ func TestSendLogsFailureOnce(t *testing.T) {
 	buf := captureLog(t)
 	at := time.Date(2026, 10, 25, 20, 0, 0, 0, time.UTC)
 	w := newTestWatcher()
-	w.watched.Bound([]uint32{1, 2, 3, 4})
+	w.watched.Set([]uint32{1, 2, 3, 4})
 	w.send = func([]uint32) error { return errors.New("symbol missing") }
 	for wid := uint32(1); wid <= 3; wid++ {
 		w.handle(event.WindowDestroyed{Stamp: event.Stamp{At: at}, Window: wid})
@@ -213,7 +213,7 @@ func TestSendLogsOverflowOnce(t *testing.T) {
 	for i := range ids {
 		ids[i] = uint32(i + 1)
 	}
-	w.watched.Bound(ids)
+	w.watched.Set(ids)
 	for wid := uint32(1); wid <= 2; wid++ {
 		w.handle(event.WindowDestroyed{Stamp: event.Stamp{At: at}, Window: wid})
 	}
