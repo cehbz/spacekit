@@ -60,6 +60,8 @@ flags (after the command):
   -boot-cap D  watch: hard cap on login convergence (default 10m)
   -last N   log: how many changes to show (default 20)
   -v        log: one line per window under each change
+  -events   log: the raw event stream instead of changes
+  -since T  log -events: RFC3339 lower bound
 `)
 	os.Exit(2)
 }
@@ -85,6 +87,8 @@ func main() {
 	bootCap := fs.Duration("boot-cap", 10*time.Minute, "watch: hard cap on login convergence")
 	last := fs.Int("last", 20, "log: changes to show")
 	verbose := fs.Bool("v", false, "log: per-window lines")
+	events := fs.Bool("events", false, "log: the raw event stream instead of changes")
+	since := fs.String("since", "", "log -events: RFC3339 lower bound")
 	fs.Parse(os.Args[2:])
 
 	var err error
@@ -100,7 +104,11 @@ func main() {
 	case "inspect":
 		err = inspectCmd()
 	case "log":
-		err = logCmd(*last, *verbose)
+		if *events {
+			err = eventsCmd(*last, *since)
+		} else {
+			err = logCmd(*last, *verbose)
+		}
 	case "undo":
 		if fs.NArg() != 1 {
 			usage()

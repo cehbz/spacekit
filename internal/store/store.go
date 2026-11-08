@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -43,6 +44,12 @@ func Open(path string) (*Store, error) {
 var migrations = []string{
 	`ALTER TABLE binding ADD COLUMN run INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE binding DROP COLUMN run`,
+	`CREATE TABLE IF NOT EXISTS stream (
+	  id      INTEGER PRIMARY KEY,
+	  at      INTEGER NOT NULL,
+	  kind    TEXT    NOT NULL,
+	  payload TEXT    NOT NULL
+	); CREATE INDEX IF NOT EXISTS stream_at ON stream(at)`,
 }
 
 func migrate(db *sql.DB) error {
@@ -662,4 +669,86 @@ func (s *Store) Prune(cutoff, boot time.Time) (int, error) {
 		return 0, err
 	}
 	return int(n), tx.Commit()
+}
+
+// Raw is one event of the agent's stream as journaled.
+type Raw struct {
+	ID      int64
+	At      time.Time
+	Kind    string
+	Payload string // JSON
+}
+
+// Record appends events to the stream in one transaction.
+func (s *Store) Record(rows []Raw) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	st, err := tx.Prepare(`INSERT INTO stream(at, kind, payload) VALUES (?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	for _, r := range rows {
+		if _, err := st.Exec(r.At.UnixMilli(), r.Kind, r.Payload); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// Stream reads events oldest first: the last n (0 for all) at or after
+// since (zero for no bound), of the given kinds (none for all).
+func (s *Store) Stream(last int, since time.Time, kinds ...string) ([]Raw, error) {
+	q := `SELECT id, at, kind, payload FROM stream WHERE at >= ?`
+	var lower int64
+	if !since.IsZero() {
+		lower = since.UnixMilli()
+	}
+	args := []any{lower}
+	if len(kinds) > 0 {
+		q += ` AND kind IN (?` + strings.Repeat(",?", len(kinds)-1) + `)`
+		for _, k := range kinds {
+			args = append(args, k)
+		}
+	}
+	q += ` ORDER BY id DESC`
+	if last > 0 {
+		q += ` LIMIT ?`
+		args = append(args, last)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Raw
+	for rows.Next() {
+		var r Raw
+		var at int64
+		if err := rows.Scan(&r.ID, &at, &r.Kind, &r.Payload); err != nil {
+			return nil, err
+		}
+		r.At = time.UnixMilli(at)
+		out = append(out, r)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, rows.Err()
+}
+
+// PruneStream deletes events before cutoff and reports how many.
+func (s *Store) PruneStream(cutoff time.Time) (int, error) {
+	res, err := s.db.Exec(`DELETE FROM stream WHERE at < ?`, cutoff.UnixMilli())
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }

@@ -578,3 +578,44 @@ func TestOweAllOwesOnlyWindowsOnScreenEachOnce(t *testing.T) {
 		t.Fatalf("the window on screen is the one owed: %d", got)
 	}
 }
+
+func TestStreamRoundTrip(t *testing.T) {
+	s := open(t)
+	at := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	rows := []Raw{
+		{At: at, Kind: "window moved", Payload: `{"Window":7}`},
+		{At: at.Add(time.Second), Kind: "window quiet", Payload: `{"Window":7}`},
+	}
+	if err := s.Record(rows); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Stream(0, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Kind != "window moved" || !got[1].At.Equal(at.Add(time.Second)) {
+		t.Fatalf("Stream = %+v", got)
+	}
+	if got, _ = s.Stream(1, time.Time{}); len(got) != 1 || got[0].Kind != "window quiet" {
+		t.Fatalf("last 1 = %+v", got)
+	}
+	if got, _ = s.Stream(0, at.Add(500*time.Millisecond)); len(got) != 1 || got[0].Kind != "window quiet" {
+		t.Fatalf("since = %+v", got)
+	}
+	if got, _ = s.Stream(0, time.Time{}, "window moved"); len(got) != 1 || got[0].Kind != "window moved" {
+		t.Fatalf("kinds = %+v", got)
+	}
+}
+
+func TestPruneStream(t *testing.T) {
+	s := open(t)
+	at := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	s.Record([]Raw{{At: at, Kind: "a"}, {At: at.Add(48 * time.Hour), Kind: "b"}})
+	n, err := s.PruneStream(at.Add(24 * time.Hour))
+	if err != nil || n != 1 {
+		t.Fatalf("PruneStream = %d, %v; want 1", n, err)
+	}
+	if got, _ := s.Stream(0, time.Time{}); len(got) != 1 || got[0].Kind != "b" {
+		t.Fatalf("after prune = %+v", got)
+	}
+}

@@ -147,3 +147,26 @@ func oweCmd() error {
 	fmt.Printf("%d window(s) owed their placement; the agent puts them back at its next look\n", n)
 	return nil
 }
+
+// eventsCmd prints the raw stream, oldest first.
+func eventsCmd(last int, since string) error {
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	var from time.Time
+	if since != "" {
+		if from, err = time.Parse(time.RFC3339, since); err != nil {
+			return fmt.Errorf("-since: %w", err)
+		}
+	}
+	rows, err := st.Stream(last, from)
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		fmt.Printf("%s  %-22s %s\n", r.At.Format("2006-01-02 15:04:05.000"), r.Kind, r.Payload)
+	}
+	return nil
+}
