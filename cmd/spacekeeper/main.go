@@ -19,8 +19,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cehbz/spacekit/internal/event"
 	"github.com/cehbz/spacekit/internal/layout"
 	"github.com/cehbz/spacekit/internal/skylight"
+	"github.com/cehbz/spacekit/internal/sysevents"
 )
 
 // The AppKit run loop used by watch must own the main OS thread.
@@ -43,6 +45,8 @@ commands:
   log       list recent changes to the arrangement and disturbances
   undo N    revert change N from the log; the agent puts the windows back
   owe       have the agent put every window back at its recorded placement
+  place [-space id] W X Y WIDTH HEIGHT
+            move or resize window W (needs Accessibility; for on-machine tests)
 
 flags (after the command):
   -f path   use an explicit file instead of the snapshot history
@@ -62,6 +66,7 @@ flags (after the command):
   -v        log: one line per window under each change
   -events   log: the raw event stream instead of changes
   -since T  log -events: RFC3339 lower bound
+  -space id place: also move the window to this space id
 `)
 	os.Exit(2)
 }
@@ -89,6 +94,7 @@ func main() {
 	verbose := fs.Bool("v", false, "log: per-window lines")
 	events := fs.Bool("events", false, "log: the raw event stream instead of changes")
 	since := fs.String("since", "", "log -events: RFC3339 lower bound")
+	spaceID := fs.Uint64("space", 0, "place: also move the window to this space id")
 	fs.Parse(os.Args[2:])
 
 	var err error
@@ -116,6 +122,18 @@ func main() {
 		err = undoCmd(fs.Arg(0))
 	case "owe":
 		err = oweCmd()
+	case "place":
+		// placeCmd works through sysevents.OnMain, which needs Run pumping
+		// the main thread's run loop.
+		// Start's error covers notification registrations, which place does not use.
+		sysevents.Start(func(event.Event) {})
+		errc := make(chan error, 1)
+		go func() {
+			errc <- placeCmd(fs.Args(), *spaceID)
+			sysevents.Stop()
+		}()
+		sysevents.Run()
+		err = <-errc
 	case "watch":
 		err = watchCmd(watchOptions{
 			interval: *interval, settle: *settled, bootCap: *bootCap, forceBoot: *forceBoot,

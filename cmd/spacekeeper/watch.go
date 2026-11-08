@@ -39,7 +39,8 @@ const (
 	// retention is how long history is kept.
 	retention = 90 * 24 * time.Hour
 	// pruneEvery is the number of interval looks between prunes (one-minute looks).
-	pruneEvery = 1440
+	pruneEvery      = 1440
+	streamRetention = 7 * 24 * time.Hour // how long the raw event stream is kept
 )
 
 type watchOptions struct {
