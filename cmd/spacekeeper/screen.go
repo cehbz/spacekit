@@ -31,7 +31,9 @@ func (liveReader) spaceList() ([]skylight.Display, error)                 { retu
 // screen keeps Current from the window server's events and publishes it by
 // value after every change. It owns the per-window request set, kept at
 // every placeable window it knows, and tracks the overview state so that
-// reconciliation can correct it from the shield-window marker.
+// reconciliation can correct it from the shield-window marker when two
+// consecutive reconciles disagree with it: a sample a minute apart must not
+// override the Dock's sub-second events.
 type screen struct {
 	b                        *bus.Bus
 	sub                      *bus.Subscription
@@ -41,6 +43,7 @@ type screen struct {
 	pic                      *snapshot
 	set                      watched
 	overview                 bool
+	markerDisagreements      int // reconciles whose marker disagreed with overview, with no overview event between
 	sendFailing, overflowing bool
 }
 
@@ -97,10 +100,12 @@ func (s *screen) handle(e event.Event) {
 		}
 	case event.WindowDestroyed:
 		s.remove(e.Window, false)
-	case event.OverviewShown:
+	case event.OverviewShown: // the Dock speaking breaks a run of disagreeing markers
 		s.overview = true
+		s.markerDisagreements = 0
 	case event.OverviewEnded:
 		s.overview = false
+		s.markerDisagreements = 0
 		s.reconcile(event.Name(e), true)
 	}
 }
@@ -211,7 +216,8 @@ func (s *screen) publish(c WindowChanged) {
 
 // reconcile replaces Current with one gather. With report, each difference
 // is logged and published, the measure of how faithfully the events keep
-// Current; the overview state is corrected from the shield-window marker.
+// Current; a reconcile whose marker disagrees with the overview state keeps
+// Current, and the second consecutive one corrects the state.
 // With report, Reconciled follows on every exit, after any CurrentChanged.
 func (s *screen) reconcile(why string, report bool) {
 	if report {
@@ -232,7 +238,12 @@ func (s *screen) reconcile(why string, report bool) {
 		}
 	} else {
 		if marker != s.overview {
-			log.Printf("screen (%s): overview marker %v, state %v; corrected", why, marker, s.overview)
+			s.markerDisagreements++
+			log.Printf("screen (%s): overview marker %v, state %v (%d)", why, marker, s.overview, s.markerDisagreements)
+			if s.markerDisagreements < 2 {
+				return
+			}
+			s.markerDisagreements = 0
 			s.overview = marker
 			if marker {
 				s.b.Publish(event.OverviewShown{Stamp: event.Now()})
@@ -241,6 +252,7 @@ func (s *screen) reconcile(why string, report bool) {
 			}
 			return
 		}
+		s.markerDisagreements = 0
 		if marker { // the overview shows thumbnail frames: keep Current
 			return
 		}

@@ -17,9 +17,11 @@ import (
 // WindowQuiet judges that window; the Reconciled that follows a space or
 // display quiet judges every window, from the Current that reconciliation
 // just published. It holds while nothing seen is the user's (locked,
-// asleep, the overview, power-off announced), through a display run and
-// while a put runs; a judgement that falls inside a hold is taken when the
-// hold ends. After a display run every window is owed its Target.
+// asleep, the overview, power-off announced), through a space or display
+// run and while a put runs; a judgement that falls inside a hold is taken
+// when the hold ends. A put's end judges the put's windows, since a put that
+// confirmed nothing produced no window events. After a display run every
+// window is owed its Target.
 type model struct {
 	b           *bus.Bus
 	sub         *bus.Subscription
@@ -27,8 +29,9 @@ type model struct {
 	boot        func() time.Time // the boot time; tests substitute
 	pic         *snapshot
 	prevVisible map[string]bool
-	hold        struct{ locked, asleep, overview, poweringOff, display, putting bool }
-	pending     string // cause of a judgement deferred by a hold
+	hold        struct{ locked, asleep, overview, poweringOff, space, display, putting bool }
+	pending     string   // cause of a judgement deferred by a hold
+	putting     []uint32 // the windows of the PutWanted in flight
 	// overviewEnded: the latest overview event was OverviewEnded, so the
 	// Reconciled for it ends the overview hold.
 	overviewEnded bool
@@ -39,7 +42,7 @@ type model struct {
 // newModel subscribes at once.
 func newModel(b *bus.Bus, st *store.Store) *model {
 	return &model{b: b, st: st, boot: bootTime,
-		sub: b.Subscribe("model", CurrentChanged{}, WindowQuiet{}, Reconciled{}, DisplayBurstBegan{}, PutEnded{},
+		sub: b.Subscribe("model", CurrentChanged{}, WindowQuiet{}, Reconciled{}, SpaceBurstBegan{}, DisplayBurstBegan{}, PutEnded{},
 			event.SessionLocked{}, event.SessionUnlocked{}, event.ScreensSlept{}, event.ScreensWoke{},
 			event.SystemSleeping{}, event.SystemWoke{}, event.PoweringOff{}, event.OverviewShown{}, event.OverviewEnded{})}
 }
@@ -73,6 +76,7 @@ func (m *model) handle(e event.Event) {
 		// The screen has just published the Current this judgement needs.
 		switch e.Cause {
 		case event.Name(SpaceQuiet{}):
+			m.hold.space = false
 			m.judge("space change", nil)
 		case event.Name(DisplayQuiet{}):
 			m.hold.display = false
@@ -84,11 +88,20 @@ func (m *model) handle(e event.Event) {
 				m.release()
 			}
 		}
+	case SpaceBurstBegan:
+		m.hold.space = true
 	case DisplayBurstBegan:
 		m.hold.display = true
 		log.Printf("display change began; judgements held")
 	case PutEnded:
+		// Current already carries the put's results: the screen published
+		// each before the WindowChanged the putter read it from.
 		m.hold.putting = false
+		ids := m.putting
+		m.putting = nil
+		if len(ids) > 0 && m.pending == "" { // else the deferred full judgement covers them; nil would judge all
+			m.judge("put ended", ids)
+		}
 		m.release()
 	case event.SessionLocked:
 		m.hold.locked = true
@@ -117,7 +130,7 @@ func (m *model) handle(e event.Event) {
 
 func (m *model) held() bool {
 	h := m.hold
-	return m.pic == nil || h.locked || h.asleep || h.overview || h.poweringOff || h.display || h.putting
+	return m.pic == nil || h.locked || h.asleep || h.overview || h.poweringOff || h.space || h.display || h.putting
 }
 
 // release takes the judgement a hold deferred.
@@ -227,6 +240,10 @@ func (m *model) judge(cause string, only []uint32) {
 	logDecisions(cause, ds)
 	if len(puts) > 0 {
 		m.hold.putting = true
+		m.putting = m.putting[:0]
+		for _, d := range puts {
+			m.putting = append(m.putting, d.Seen.Binding)
+		}
 		m.b.Publish(PutWanted{Stamp: event.Now(), Arr: arr, Current: m.pic.clone(), Spaces: saved, Decisions: puts})
 	}
 }

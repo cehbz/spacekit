@@ -153,6 +153,27 @@ func TestModelHoldsWhilePuttingThenGivesUp(t *testing.T) {
 	}
 }
 
+// A put that confirmed nothing produced no window events: its PutEnded
+// judges the put's windows, and the owed window is given up.
+func TestModelPutEndedJudgesPutWindows(t *testing.T) {
+	b, out := startModel(t)
+	b.Publish(current(twoWindows()))
+	decisionsOf(t, out, 2)
+	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
+	shrunk := twoWindows()
+	shrunk.windows[1].Frame = layout.Rect{X: 10, Y: 10, W: 100, H: 100}
+	b.Publish(current(shrunk))
+	b.Publish(Reconciled{Stamp: event.Now(), Cause: "display quiet"})
+	expectEvent(t, out, TargetChanged{}, 2*time.Second)
+	expectEvent(t, out, PutWanted{}, 2*time.Second)
+	b.Publish(PutEnded{Stamp: event.Now()}) // nothing confirmed, nothing pending: Current unchanged
+	ds := decisionsOf(t, out, 1)
+	if len(ds) != 1 || ds[0].Kind != arrangement.GiveUp || ds[0].Seen.Binding != 2 {
+		t.Fatalf("after a put that confirmed nothing: %+v, want give up on window 2 only", ds)
+	}
+	expectNone(t, out, 100*time.Millisecond)
+}
+
 // A boot: the same windows under new ids, in a fresh "boot" the store has no
 // bindings for. Window 2 comes back as 12 with its title, at the wrong frame
 // and space; window 1 as 11 with its frame, on the wrong space; 13 is new.
@@ -371,4 +392,47 @@ func TestModelOverviewReopenedKeepsHold(t *testing.T) {
 	if d := decisionsOf(t, out, 1)[0]; d.Seen.Binding != 1 || d.Seen.Frame.X != 400 {
 		t.Fatalf("deferred decision %+v", d)
 	}
+}
+
+// A space run holds judgements; the space change's full judgement covers the
+// cause it deferred.
+func TestModelSpaceRunHolds(t *testing.T) {
+	b, out := startModel(t)
+	b.Publish(current(twoWindows()))
+	decisionsOf(t, out, 2)
+	b.Publish(SpaceBurstBegan{Stamp: event.Now()})
+	moved := twoWindows()
+	moved.windows[0].Frame.X = 400
+	b.Publish(current(moved))
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1})
+	expectNone(t, out, 100*time.Millisecond) // held by the space run
+	b.Publish(Reconciled{Stamp: event.Now(), Cause: "space quiet"})
+	tc := expectEvent(t, out, TargetChanged{}, 2*time.Second).(TargetChanged)
+	if tc.Cause != "space change" || len(tc.Decisions) != 1 || tc.Decisions[0].Seen.Binding != 1 || tc.Decisions[0].Seen.Frame.X != 400 {
+		t.Fatalf("%q: %+v, want the space change judging window 1", tc.Cause, tc.Decisions)
+	}
+	expectNone(t, out, 100*time.Millisecond)
+}
+
+// A space picked from inside the overview ends the overview inside a space
+// run: the overview's release waits for the space quiet.
+func TestModelOverviewEndInsideSpaceRunWaits(t *testing.T) {
+	b, out := startModel(t)
+	b.Publish(current(twoWindows()))
+	decisionsOf(t, out, 2)
+	b.Publish(event.OverviewShown{Stamp: event.Now()})
+	moved := twoWindows()
+	moved.windows[0].Frame.X = 400
+	b.Publish(current(moved))
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1}) // deferred by the overview
+	b.Publish(SpaceBurstBegan{Stamp: event.Now()})
+	b.Publish(event.OverviewEnded{Stamp: event.Now()})
+	b.Publish(Reconciled{Stamp: event.Now(), Cause: "overview ended"})
+	expectNone(t, out, 100*time.Millisecond) // the space run still holds
+	b.Publish(Reconciled{Stamp: event.Now(), Cause: "space quiet"})
+	tc := expectEvent(t, out, TargetChanged{}, 2*time.Second).(TargetChanged)
+	if tc.Cause != "space change" || len(tc.Decisions) != 1 || tc.Decisions[0].Seen.Binding != 1 {
+		t.Fatalf("%q: %+v, want the space change judging window 1", tc.Cause, tc.Decisions)
+	}
+	expectNone(t, out, 100*time.Millisecond)
 }

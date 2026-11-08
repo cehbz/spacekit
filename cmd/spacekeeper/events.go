@@ -19,7 +19,8 @@ type WindowQuiet struct {
 	Window uint32
 }
 
-// SpaceQuiet: no space event for the space gap.
+// SpaceBurstBegan and SpaceQuiet bracket a run of space events.
+type SpaceBurstBegan struct{ event.Stamp }
 type SpaceQuiet struct{ event.Stamp }
 
 // DisplayBurstBegan and DisplayQuiet bracket a run of display reconfigurations.

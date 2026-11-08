@@ -157,19 +157,27 @@ func TestScreenReconcilesOnTick(t *testing.T) {
 	}
 }
 
+// A one-tick sample does not override the Dock's events: the marker
+// corrects the overview state only when two consecutive ticks disagree.
 func TestScreenCorrectsOverviewFromMarker(t *testing.T) {
 	r := &fakeReader{pic: testPicture()}
 	b, _, out := startScreen(t, r, event.OverviewShown{}, event.OverviewEnded{}, CurrentChanged{}, Reconciled{})
 	expectEvent(t, out, CurrentChanged{}, time.Second)
 	r.pic.all = append(r.pic.all, layout.ListedWindow{ID: 99, OwnerName: "WindowManager", Title: "ExposeShieldWindow"})
 	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	expectCause(t, out, "tick") // one disagreeing tick: nothing corrected, Current kept
+	expectNone(t, out, 100*time.Millisecond)
+	b.Publish(Tick{Stamp: event.Now(), N: 2})
 	expectEvent(t, out, event.OverviewShown{}, time.Second) // the Dock never said so
 	expectCause(t, out, "tick")
-	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	b.Publish(Tick{Stamp: event.Now(), N: 3})
 	expectCause(t, out, "tick")              // Current is kept while the overview is open
 	expectNone(t, out, 100*time.Millisecond) // and no CurrentChanged
 	r.pic.all = r.pic.all[:1]
-	b.Publish(Tick{Stamp: event.Now(), N: 3})
+	b.Publish(Tick{Stamp: event.Now(), N: 4})
+	expectCause(t, out, "tick")
+	expectNone(t, out, 100*time.Millisecond)
+	b.Publish(Tick{Stamp: event.Now(), N: 5})
 	expectEvent(t, out, event.OverviewEnded{}, time.Second)
 	expectCause(t, out, "tick")
 	expectEvent(t, out, CurrentChanged{}, time.Second)
@@ -177,6 +185,42 @@ func TestScreenCorrectsOverviewFromMarker(t *testing.T) {
 		t.Fatalf("cause %q", e.Cause)
 	}
 	expectNone(t, out, 150*time.Millisecond)
+}
+
+// A tick that agrees with the state breaks a run of disagreeing ones.
+func TestScreenMarkerDisagreementsMustBeConsecutive(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, _, out := startScreen(t, r, event.OverviewShown{}, event.OverviewEnded{}, CurrentChanged{}, Reconciled{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	shield := layout.ListedWindow{ID: 99, OwnerName: "WindowManager", Title: "ExposeShieldWindow"}
+	r.pic.all = append(r.pic.all, shield)
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	expectCause(t, out, "tick")
+	r.pic.all = r.pic.all[:1] // safe: the screen is idle after publishing
+	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	expectCause(t, out, "tick")
+	r.pic.all = append(r.pic.all, shield)
+	b.Publish(Tick{Stamp: event.Now(), N: 3})
+	expectCause(t, out, "tick")
+	expectNone(t, out, 100*time.Millisecond)
+}
+
+// The Dock speaking between two disagreeing ticks breaks the run: the
+// second tick disagrees with the state the Dock set, not the first's.
+func TestScreenDockEventResetsMarkerDisagreements(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, _, out := startScreen(t, r, event.OverviewShown{}, event.OverviewEnded{}, CurrentChanged{}, Reconciled{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	r.pic.all = append(r.pic.all, layout.ListedWindow{ID: 99, OwnerName: "WindowManager", Title: "ExposeShieldWindow"})
+	b.Publish(Tick{Stamp: event.Now(), N: 1}) // marker open, state closed
+	expectCause(t, out, "tick")
+	b.Publish(event.OverviewShown{Stamp: event.Now()}) // the Dock: state open
+	expectEvent(t, out, event.OverviewShown{}, time.Second)
+	r.pic.all = r.pic.all[:1]                 // safe: handling OverviewShown reads nothing from the reader
+	b.Publish(Tick{Stamp: event.Now(), N: 2}) // marker closed, state open
+	expectCause(t, out, "tick")
+	expectNone(t, out, 100*time.Millisecond)
 }
 
 func TestScreenStartupInsideOverviewSaysSo(t *testing.T) {

@@ -8,12 +8,16 @@ import (
 	"github.com/cehbz/spacekit/internal/event"
 )
 
-// settler compresses the window server's streams into the events the model
-// judges on: one WindowQuiet per window per run of events about it, one
-// SpaceQuiet per run of space events, DisplayBurstBegan and DisplayQuiet
-// around a run of reconfigurations. Window events inside an open space or
-// display run add nothing, and a run beginning drops open window runs: the
-// run's trailing event covers them.
+// settler compresses the streams into the events the model judges on: one
+// WindowQuiet per window per run of the screen's WindowChanged about it,
+// SpaceBurstBegan and SpaceQuiet around a run of space events,
+// DisplayBurstBegan and DisplayQuiet around a run of reconfigurations.
+// Window runs are keyed on the screen's output, not the window server's
+// events: delivery is FIFO per subscriber and the screen publishes
+// CurrentChanged before WindowChanged, so every WindowQuiet reaches the model
+// after the Current carrying that window's last state. Window changes inside
+// an open space or display run add nothing, and a run beginning drops open
+// window runs: the run's trailing event covers them.
 type settler struct {
 	b                         *bus.Bus
 	sub                       *bus.Subscription
@@ -24,7 +28,7 @@ var one = struct{}{} // the key of a run that is not per window
 
 func newSettler(b *bus.Bus, windowGap, spaceGap, displayGap time.Duration) *settler {
 	return &settler{b: b,
-		sub: b.Subscribe("settler", event.WindowAttached{}, event.WindowDetached{}, event.WindowMoved{}, event.WindowResized{},
+		sub: b.Subscribe("settler", WindowChanged{},
 			event.SpaceCreated{}, event.SpaceDestroyed{}, event.SpaceSwitched{}, event.DisplayReconfigured{}),
 		windows: bus.NewDebounce(windowGap), spaces: bus.NewDebounce(spaceGap), displays: bus.NewDebounce(displayGap)}
 }
@@ -69,17 +73,13 @@ func (s *settler) run(ctx context.Context) {
 func (s *settler) note(e event.Event) {
 	at := e.When()
 	switch e := e.(type) {
-	case event.WindowAttached:
-		s.window(e.Window, at)
-	case event.WindowDetached:
-		s.window(e.Window, at)
-	case event.WindowMoved:
-		s.window(e.Window, at)
-	case event.WindowResized:
+	case WindowChanged: // a Gone change too: the model's judgement of a gone window decides nothing
 		s.window(e.Window, at)
 	case event.SpaceCreated, event.SpaceDestroyed, event.SpaceSwitched:
 		s.windows.Clear()
-		s.spaces.Note(one, at)
+		if s.spaces.Note(one, at) {
+			s.b.Publish(SpaceBurstBegan{Stamp: event.Now()})
+		}
 	case event.DisplayReconfigured:
 		s.windows.Clear()
 		if s.displays.Note(one, at) {

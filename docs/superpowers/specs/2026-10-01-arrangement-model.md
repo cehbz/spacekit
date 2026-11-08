@@ -98,9 +98,9 @@ during which it was true; a change closes the open row and opens a new one in
 one transaction. The current arrangement is the open rows; history is the
 closed ones. Entities: window, binding, arrangement (display set and its
 spaces), placement (versioned, with the owed flag), change (cause: adopted,
-restored, released, bound, undone), disturbance (kind, start, end). The agent
-holds no state between looks that is not in the database. Closed versions
-older than 90 days are deleted.
+restored, released, bound, undone). Disturbance spans are read from the
+journal of the agent's events. The agent holds no state between looks that is
+not in the database. Closed versions older than 90 days are deleted.
 
 ## What is retired
 
@@ -112,30 +112,13 @@ special cases (they become disturbances); login convergence as a mode; the
 pending-burst file.
 
 Kept: gathering the session, the window-server move, Accessibility frame and
-fullscreen writes, recreating missing desktops, `sysevents`, `settle`,
-matching (now only for binding), `inspect`.
+fullscreen writes, `sysevents`, `inspect`.
 
 ## Repair tooling (for diagnosis, not for browsing)
 
 `spacekeeper log` lists changes and disturbances with their causes;
 `spacekeeper undo <change>` reverts one change and owes the affected windows;
 `spacekeeper owe` marks everything owed, the replacement for a manual restore.
-
-## Delivery in slices
-
-1. **In-session.** Store, looks, adoption, display disturbance, owed, repair,
-   release, overview and lock as disturbances.
-2. **Provisional bindings (2a).** A binding is dead when its id leaves the
-   window list; an unclaimed window of the app binds to a dead record on
-   evidence and is owed. Snapshot saving and login convergence stay as the
-   login path.
-3. **Login through the model (2b).** After a reboot every binding is dead,
-   so the same binding serves login. Snapshots, their commands and login
-   convergence are removed; a command that moves or resizes one window by id
-   replaces `restore -f` for on-machine tests.
-4. **Repair tooling and retention.** `log`, `undo`, `owe`; 90-day pruning.
-
-Each slice ends installed and running, verified on the machine.
 
 ## Testing
 
