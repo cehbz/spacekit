@@ -90,6 +90,16 @@ static CFDataRef sk_spaces_for_window(uint32_t wid) {
 	return d;
 }
 
+typedef CGError (*sk_request_fn)(int, uint32_t *, int);
+
+// Returns -1 when the symbol is missing, else the CGError.
+static int sk_request_window_notifications(uint32_t *wids, int n) {
+	static sk_request_fn f = NULL;
+	if (!f) f = (sk_request_fn)sk_sym("SLSRequestNotificationsForWindows", "CGSRequestNotificationsForWindows");
+	if (!f) return -1;
+	return (int)f(sk_cid(), wids, n);
+}
+
 static CFDataRef sk_window_list(void) {
 	CFArrayRef arr = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID);
 	if (!arr) return NULL;
@@ -203,6 +213,23 @@ func SpacesForWindow(wid uint32) ([]uint64, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+// RequestWindowNotifications asks the window server to deliver per-window
+// notifications (moved, resized, shown, hidden, destroyed) for exactly these
+// windows; each call replaces the previous set. At most 1024 ids are accepted.
+func RequestWindowNotifications(wids []uint32) error {
+	var p *C.uint32_t
+	if len(wids) > 0 {
+		p = (*C.uint32_t)(unsafe.Pointer(&wids[0]))
+	}
+	switch rc := C.sk_request_window_notifications(p, C.int(len(wids))); {
+	case rc < 0:
+		return errors.New("SLSRequestNotificationsForWindows unavailable")
+	case rc != 0:
+		return fmt.Errorf("SLSRequestNotificationsForWindows: CGError %d", int(rc))
+	}
+	return nil
 }
 
 // WindowList returns all windows in the session, including other spaces.
