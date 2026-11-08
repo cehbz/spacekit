@@ -35,9 +35,11 @@ hysteresis band, with title and frame together settled first. Without such
 evidence it is a window of its own. A wrong binding moves an unrelated
 window; a missed one leaves a window where the app put it.
 
-**Look.** An observation of the live session: every minute, at each space
-change, and immediately before an announced disturbance (screen or system
-sleep, power-off). A look is two samples 400 ms apart that agree; if anything
+**Look.** An observation of the live session: when the window server's
+window events (attached, detached, moved, resized, shown, hidden) have been
+quiet for 500 ms, at each space change, every minute as a safety net, and
+immediately before an announced disturbance (screen or system sleep,
+power-off). A look is two samples 400 ms apart that agree; if anything
 moved between them the screen is in motion and the look is put off and
 retried. During a space-switch slide the window server reports every window
 shifted sideways, and a single sample taken then reads as if every window
