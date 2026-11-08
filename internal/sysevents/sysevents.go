@@ -48,8 +48,6 @@ const (
 	SpaceSwitched   // no payload
 	WindowMoved     // Event.Window
 	WindowResized   // Event.Window
-	WindowShown     // Event.Window
-	WindowHidden    // Event.Window
 	WindowDestroyed // Event.Window
 )
 
@@ -87,10 +85,6 @@ func (k Kind) String() string {
 		return "window moved"
 	case WindowResized:
 		return "window resized"
-	case WindowShown:
-		return "window shown"
-	case WindowHidden:
-		return "window hidden"
 	case WindowDestroyed:
 		return "window destroyed"
 	}

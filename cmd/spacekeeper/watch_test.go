@@ -72,7 +72,7 @@ func TestHandleWindowEventAbsorbedDuringBurst(t *testing.T) {
 	} {
 		w := newTestWatcher()
 		open(w)
-		w.handle(sysevents.Event{Kind: sysevents.WindowShown, At: at.Add(time.Second), Window: 42})
+		w.handle(sysevents.Event{Kind: sysevents.WindowResized, At: at.Add(time.Second), Window: 42})
 		if w.windows.Open() {
 			t.Fatalf("%s: a window event during the burst should add nothing", name)
 		}

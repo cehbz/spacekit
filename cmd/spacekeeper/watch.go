@@ -219,8 +219,7 @@ func (w *watcher) handle(e sysevents.Event) {
 		if w.noteWindow(e) && w.windowAttached(e.Window) {
 			w.sendWatched()
 		}
-	case sysevents.WindowDetached, sysevents.WindowMoved, sysevents.WindowResized,
-		sysevents.WindowShown, sysevents.WindowHidden:
+	case sysevents.WindowDetached, sysevents.WindowMoved, sysevents.WindowResized:
 		w.noteWindow(e)
 	case sysevents.WindowDestroyed:
 		if w.watched.Destroyed(e.Window) {
@@ -250,7 +249,7 @@ func (w *watcher) noteSpaces(at time.Time) {
 // noteWindow records a window-server window event and reports whether it
 // did. One arriving while a space change or a display burst is open, or
 // while login convergence holds looks, adds nothing: the look those produce
-// covers it, and a space switch reports every window shown and hidden.
+// covers it.
 // Window events noted before a space change or a display burst are dropped
 // by noteSpaces and noteDisplays.
 func (w *watcher) noteWindow(e sysevents.Event) bool {

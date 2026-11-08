@@ -26,8 +26,6 @@ enum {
 	kSpaceSwitched,
 	kWindowMoved,
 	kWindowResized,
-	kWindowShown,
-	kWindowHidden,
 	kWindowDestroyed,
 };
 
@@ -75,7 +73,7 @@ static const struct { uint32_t type; int kind; } slsTypes[] = {
 	{1327, kSpaceCreated}, {1328, kSpaceDestroyed},
 	{1329, kSpaceSwitched}, {1401, kSpaceSwitched},
 	{806, kWindowMoved}, {807, kWindowResized},
-	{815, kWindowShown}, {816, kWindowHidden}, {804, kWindowDestroyed},
+	{804, kWindowDestroyed},
 };
 
 static void slsNotify(uint32_t type, void *data, size_t len, void *ctx, int cid) {
@@ -93,7 +91,7 @@ static void slsNotify(uint32_t type, void *data, size_t len, void *ctx, int cid)
 	case 1327: case 1328: case 1329:
 		if (len >= 8) memcpy(&space, data, 8);
 		break;
-	case 806: case 807: case 815: case 816: case 804:
+	case 806: case 807: case 804:
 		if (len >= 4) memcpy(&window, data, 4);
 		break;
 	}

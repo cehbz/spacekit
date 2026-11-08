@@ -20,7 +20,7 @@ func TestKindsMatchObjCEnum(t *testing.T) {
 		"kAppLaunched", "kDisplayReconfigured", "kScreensSleep", "kScreensWake",
 		"kSystemWillSleep", "kSystemWake", "kSpaceChanged", "kWillPowerOff", "kSessionUnlocked",
 		"kWindowAttached", "kWindowDetached", "kSpaceCreated", "kSpaceDestroyed", "kSpaceSwitched",
-		"kWindowMoved", "kWindowResized", "kWindowShown", "kWindowHidden", "kWindowDestroyed",
+		"kWindowMoved", "kWindowResized", "kWindowDestroyed",
 	}
 	if got := int(WindowDestroyed) + 1; got != len(want) {
 		t.Fatalf("Go declares %d kinds, the test lists %d", got, len(want))
@@ -54,7 +54,7 @@ func TestWindowKindStrings(t *testing.T) {
 		WindowAttached: "window attached", WindowDetached: "window detached",
 		SpaceCreated: "space created", SpaceDestroyed: "space destroyed", SpaceSwitched: "space switched",
 		WindowMoved: "window moved", WindowResized: "window resized",
-		WindowShown: "window shown", WindowHidden: "window hidden", WindowDestroyed: "window destroyed",
+		WindowDestroyed: "window destroyed",
 	}
 	for k, want := range cases {
 		if got := k.String(); got != want {
