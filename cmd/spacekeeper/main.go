@@ -34,6 +34,8 @@ commands:
             (the launchd agent)
   inspect   print every recorded window with its space, CGWindow bounds, and
             the frame its app reports via Accessibility (needs Accessibility)
+  frames    sample drawn rects against window bounds; run while switching
+            spaces
   log       list recent changes to the arrangement and display disturbances
   undo N    revert change N from the log; the agent puts the windows back
             at its next decide
@@ -44,6 +46,8 @@ commands:
 
 flags (after the command):
   -interval D  watch: validation tick (default 1m)
+  -for D    frames: how long to sample (default 20s)
+  -every D  frames: sampling interval (default 200ms)
   -last N   log: how many changes to show (default 20)
   -v        log: one line per window under each change
   -events   log: the raw event stream instead of changes
@@ -65,12 +69,16 @@ func main() {
 	events := fs.Bool("events", false, "log: the raw event stream instead of changes")
 	since := fs.String("since", "", "log -events: RFC3339 lower bound")
 	spaceID := fs.Uint64("space", 0, "place: also move the window to this space id")
+	framesFor := fs.Duration("for", 20*time.Second, "frames: how long to sample")
+	framesEvery := fs.Duration("every", 200*time.Millisecond, "frames: sampling interval")
 	fs.Parse(os.Args[2:])
 
 	var err error
 	switch cmd {
 	case "inspect":
 		err = inspectCmd()
+	case "frames":
+		err = framesCmd(*framesFor, *framesEvery)
 	case "log":
 		if *events {
 			err = eventsCmd(*last, *since)

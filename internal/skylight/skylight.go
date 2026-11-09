@@ -100,6 +100,20 @@ static int sk_request_window_notifications(uint32_t *wids, int n) {
 	return (int)f(sk_cid(), wids, n);
 }
 
+typedef CGError (*sk_bounds_fn)(int cid, uint32_t wid, CGRect *out);
+
+// Returns -1 when the symbol is missing, else the CGError.
+static int sk_window_bounds(uint32_t wid, double *x, double *y, double *w, double *h) {
+	static sk_bounds_fn f = NULL;
+	if (!f) f = (sk_bounds_fn)sk_sym("SLSGetWindowBounds", "CGSGetWindowBounds");
+	if (!f) return -1;
+	CGRect r;
+	CGError rc = f(sk_cid(), wid, &r);
+	if (rc != kCGErrorSuccess) return (int)rc;
+	*x = r.origin.x; *y = r.origin.y; *w = r.size.width; *h = r.size.height;
+	return 0;
+}
+
 static CFDataRef sk_window_list(void) {
 	CFArrayRef arr = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID);
 	if (!arr) return NULL;
@@ -235,6 +249,20 @@ func RequestWindowNotifications(wids []uint32) error {
 		return fmt.Errorf("SLSRequestNotificationsForWindows: CGError %d", int(rc))
 	}
 	return nil
+}
+
+// WindowFrame is a window's frame as the window server holds it
+// (SLSGetWindowBounds), as against the drawn rect the window list reports,
+// which a space slide or the overview transforms. Main thread only.
+func WindowFrame(wid uint32) (x, y, w, h float64, err error) {
+	var cx, cy, cw, ch C.double
+	switch rc := C.sk_window_bounds(C.uint32_t(wid), &cx, &cy, &cw, &ch); {
+	case rc < 0:
+		return 0, 0, 0, 0, errors.New("SLSGetWindowBounds unavailable")
+	case rc != 0:
+		return 0, 0, 0, 0, fmt.Errorf("SLSGetWindowBounds: CGError %d", int(rc))
+	}
+	return float64(cx), float64(cy), float64(cw), float64(ch), nil
 }
 
 // ErrNotListed reports a window the window server no longer lists.
