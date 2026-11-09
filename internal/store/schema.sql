@@ -1,3 +1,5 @@
+-- Version 0. Later shapes (stream, app, window.app_id, placement's space key) are in store.go's migrations.
+
 -- One arrangement per display set (sorted display UUIDs, comma-joined).
 CREATE TABLE IF NOT EXISTS arrangement (
   id          INTEGER PRIMARY KEY,

@@ -36,6 +36,24 @@ func count(t *testing.T, s *Store, query string, args ...any) int {
 	return n
 }
 
+// arrangementWith returns the arrangement for a display set with the given
+// space keys recorded, as a judgement records them before placing windows.
+func arrangementWith(t *testing.T, s *Store, displaySet string, keys ...string) int64 {
+	t.Helper()
+	arr, err := s.Arrangement(displaySet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spaces := make([]layout.SavedSpace, len(keys))
+	for i, k := range keys {
+		spaces[i] = layout.SavedSpace{UUID: k, DisplayUUID: "D1", Index: i}
+	}
+	if err := s.SetSpaces(arr, spaces); err != nil {
+		t.Fatal(err)
+	}
+	return arr
+}
+
 func seen(wid uint32, space string, f layout.Rect) arrangement.Seen {
 	return arrangement.Seen{Binding: wid, PID: 9, Bundle: "com.example", App: "Example", Title: "t",
 		Placement: arrangement.Placement{Space: space, Frame: f}}
@@ -94,7 +112,7 @@ func TestSpacesUpsert(t *testing.T) {
 
 func TestAdoptCreatesWindowBindingAndPlacement(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	if r.Window == 0 || !r.Placed || r.Space != "S1" || r.Frame != full || r.Owed {
 		t.Fatalf("recorded = %+v", r)
@@ -109,7 +127,7 @@ func TestAdoptCreatesWindowBindingAndPlacement(t *testing.T) {
 
 func TestAdoptAgainClosesTheOldVersion(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	err := s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}})
 	if err != nil {
@@ -132,7 +150,7 @@ func TestAdoptAgainClosesTheOldVersion(t *testing.T) {
 
 func TestRecordedIsScopedToBootAndArrangement(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1,D2")
+	arr := arrangementWith(t, s, "D1,D2", "S1")
 	adoptNew(t, s, arr, 42, "S1", full)
 	if rs, _ := s.Recorded(arr, boot.Add(time.Hour)); len(rs) != 0 {
 		t.Fatalf("another boot has no bindings: %+v", rs)
@@ -155,7 +173,7 @@ func one(t *testing.T, s *Store, arr int64) arrangement.Recorded {
 
 func TestOweThenRelease(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
 		t.Fatal(err)
@@ -176,7 +194,7 @@ func TestOweThenRelease(t *testing.T) {
 
 func TestRepairRecordsProgress(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	want := arrangement.Placement{Space: "S1", Frame: full}
 	ds := []arrangement.Decision{
@@ -193,7 +211,7 @@ func TestRepairRecordsProgress(t *testing.T) {
 
 func TestIdleRepairWritesNothing(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	before := count(t, s, `SELECT COUNT(*) FROM change`)
 	idle := arrangement.Decision{Kind: arrangement.Repair, Window: r.Window, Seen: seen(42, "S1", half), Want: arrangement.Placement{Space: "S1", Frame: full}}
@@ -207,7 +225,7 @@ func TestIdleRepairWritesNothing(t *testing.T) {
 
 func TestGiveUpAdoptsAndClearsOwed(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	ds := []arrangement.Decision{{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S1", half)}}
 	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
@@ -227,7 +245,7 @@ func TestGiveUpAdoptsAndClearsOwed(t *testing.T) {
 
 func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	a := adoptNew(t, s, arr, 1, "S1", full)
 	adoptNew(t, s, arr, 2, "S1", full)
 	moved := []arrangement.Decision{
@@ -254,7 +272,7 @@ func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
 
 func TestRefreshTitles(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	sn := seen(42, "S1", full)
 	sn.Title = "renamed"
@@ -358,7 +376,7 @@ func TestMigrationDropsDisturbance(t *testing.T) {
 
 func TestStoredCarriesTheLatestBinding(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S2")
 	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S2", full)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +392,7 @@ func TestStoredCarriesTheLatestBinding(t *testing.T) {
 
 func TestBindGivesAStoredWindowAFreshIdAndOwesIt(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S2", "S5")
 	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S2", full)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -407,7 +425,7 @@ func TestBindGivesAStoredWindowAFreshIdAndOwesIt(t *testing.T) {
 
 func TestJournalShowsWhatEachChangeDid(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	r := adoptNew(t, s, arr, 42, "S1", full) // change 1: first sighting
 	if err := s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}); err != nil {
 		t.Fatal(err)
@@ -444,7 +462,7 @@ func TestJournalShowsWhatEachChangeDid(t *testing.T) {
 
 func TestUndoRestoresThePriorPlacementAndOwesTheWindow(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	if err := s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}); err != nil {
 		t.Fatal(err)
@@ -466,7 +484,7 @@ func TestUndoRestoresThePriorPlacementAndOwesTheWindow(t *testing.T) {
 
 func TestUndoLeavesWindowsThatChangedAgain(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1", "S2", "S3")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}})
 	bad := int64(count(t, s, `SELECT MAX(id) FROM change`))
@@ -486,7 +504,7 @@ func TestUndoLeavesWindowsThatChangedAgain(t *testing.T) {
 
 func TestUndoOfAFirstSightingLeavesNoPlacement(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1")
 	adoptNew(t, s, arr, 42, "S1", full)
 	reverted, _, err := s.Undo(1, t0.Add(time.Minute))
 	if err != nil || reverted != 1 {
@@ -506,7 +524,7 @@ func TestUndoOfAnUnknownChangeIsAnError(t *testing.T) {
 
 func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	old := t0.Add(-100 * 24 * time.Hour)
 	oldBoot := boot.Add(-100 * 24 * time.Hour)
 
@@ -552,7 +570,7 @@ func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 // windows on screen are owed, each once.
 func TestOweAllOwesOnlyWindowsOnScreenEachOnce(t *testing.T) {
 	s := open(t)
-	arr, _ := s.Arrangement("D1")
+	arr := arrangementWith(t, s, "D1", "S1")
 	a := adoptNew(t, s, arr, 1, "S1", full)
 	adoptNew(t, s, arr, 2, "S1", full) // closed since: not among the live ids
 	if err := s.Bind(arr, boot, t0, "relaunch", []Bound{{Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {
@@ -611,5 +629,171 @@ func TestPruneStream(t *testing.T) {
 	}
 	if got, _ := s.Stream(0, time.Time{}); len(got) != 1 || got[0].Kind != "b" {
 		t.Fatalf("after prune = %+v", got)
+	}
+}
+
+// A window recorded only in another arrangement is a binding candidate here,
+// unplaced.
+func TestStoredReturnsWindowsPlacedElsewhereUnplaced(t *testing.T) {
+	s := open(t)
+	air, _ := s.Arrangement("D1")
+	dual := arrangementWith(t, s, "D1,D2", "S9")
+	if err := s.Apply(dual, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S9", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.Stored(air)
+	if err != nil || len(st) != 1 {
+		t.Fatalf("Stored(air) = %+v, %v; want the dual-only window", st, err)
+	}
+	o := st[0]
+	if o.Placed || o.Space != "" || o.Title != "autobrr" || o.Bundle != "com.example" || o.App != "Example" || o.Boot != boot.Unix() || o.Binding != 42 {
+		t.Fatalf("stored = %+v; want unplaced, with title, app and latest binding", o)
+	}
+	st, _ = s.Stored(dual)
+	if len(st) != 1 || !st[0].Placed || st[0].Space != "S9" || st[0].Frame != full {
+		t.Fatalf("Stored(dual) = %+v; want placed on S9", st)
+	}
+}
+
+// Binding a window that has no placement here owes it nothing: the next
+// judgement adopts it where it is.
+func TestBindToAWindowUnplacedHereOwesNothing(t *testing.T) {
+	s := open(t)
+	air, _ := s.Arrangement("D1")
+	dual := arrangementWith(t, s, "D1,D2", "S9")
+	if err := s.Apply(dual, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S9", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := s.Stored(air)
+	if len(st) != 1 {
+		t.Fatalf("Stored(air) = %+v, want the dual-only window", st)
+	}
+	boot2 := boot.Add(24 * time.Hour)
+	if err := s.Bind(air, boot2, t0.Add(24*time.Hour), "startup", []Bound{{Window: st[0].Window, Seen: seenTitled(900, "autobrr", "S1", half)}}); err != nil {
+		t.Fatal(err)
+	}
+	rs, _ := s.Recorded(air, boot2)
+	if len(rs) != 1 || rs[0].Window != st[0].Window || rs[0].Placed || rs[0].Owed {
+		t.Fatalf("Recorded(air) = %+v; want the same window, unplaced, not owed", rs)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM owed`); n != 0 {
+		t.Fatalf("owed rows = %d, want 0", n)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM window`); n != 1 {
+		t.Fatalf("windows = %d, want 1", n)
+	}
+}
+
+// Two windows of one bundle with different owner names share an app row;
+// two bundle-less apps are told apart by name.
+func TestAppsAreKeyedByBundleOrName(t *testing.T) {
+	s := open(t)
+	arr := arrangementWith(t, s, "D1", "S1")
+	a := seenTitled(1, "a", "S1", full)
+	b := seenTitled(2, "b", "S1", half)
+	b.App = "Example (Renamed)"
+	c := seenTitled(3, "c", "S1", full)
+	c.Bundle, c.App = "", "term"
+	d := seenTitled(4, "d", "S1", half)
+	d.Bundle, d.App = "", "sh"
+	for _, w := range []arrangement.Seen{a, b, c, d} {
+		if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: w}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM app`); n != 3 {
+		t.Fatalf("apps = %d, want 3 (one bundle, two names)", n)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM window w JOIN app p ON p.id = w.app_id WHERE p.bundle = 'com.example'`); n != 2 {
+		t.Fatalf("windows under com.example = %d, want 2", n)
+	}
+}
+
+// A version-4 database: window carries bundle and app, placement has no
+// foreign key to space. Open splits app out and keeps every row.
+func TestMigrationSplitsAppFromWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v4.db")
+	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		schema,
+		`CREATE TABLE IF NOT EXISTS stream (id INTEGER PRIMARY KEY, at INTEGER NOT NULL, kind TEXT NOT NULL, payload TEXT NOT NULL)`,
+		`PRAGMA user_version = 4`,
+		`INSERT INTO arrangement(id, display_set) VALUES (1, 'D1'), (2, 'D1,D2')`,
+		`INSERT INTO space(arrangement_id, key, display, idx) VALUES (1, 'S1', 'D1', 0), (2, 'S1', 'D1', 0), (2, 'S9', 'D2', 0)`,
+		`INSERT INTO window(id, bundle, app, title, first_seen) VALUES
+		   (16, 'com.google.Chrome', 'Google Chrome', 'autobrr', 0),
+		   (17, 'com.google.Chrome', 'Google Chrome', 'Review', 0),
+		   (18, '', 'term', 'zsh', 0),
+		   (19, 'com.google.Chrome', 'Chrome', 'Gmail', 0)`,
+		`INSERT INTO binding(window_id, boot, wid) VALUES (16, 1790000000, 149), (17, 1790000000, 150), (18, 1790000000, 151)`,
+		`INSERT INTO change(id, at, cause) VALUES (1, 1790000100000, 'look'), (2, 1790000200000, 'look')`,
+		`INSERT INTO placement(id, window_id, arrangement_id, space, x, y, w, h, opened_by, closed_by) VALUES
+		   (1, 16, 2, 'S9', 0, 30, 1280, 1410, 1, NULL),
+		   (2, 17, 2, 'S1', 0, 30, 1280, 1410, 1, 2),
+		   (3, 17, 2, 'S9', 0, 30, 640, 700, 2, NULL),
+		   (4, 18, 1, 'S1', 0, 517, 735, 923, 1, NULL)`,
+		`INSERT INTO owed(window_id, arrangement_id, progress, since) VALUES (16, 2, 1, 2)`,
+		`INSERT INTO event(change_id, window_id, kind) VALUES (1, 16, 'adopted'), (2, 17, 'adopted')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if v := count(t, s, `PRAGMA user_version`); v != 5 {
+		t.Fatalf("user_version = %d, want 5", v)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM app`); n != 2 {
+		t.Fatalf("apps = %d, want 2", n)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM pragma_table_info('window') WHERE name IN ('bundle', 'app')`); n != 0 {
+		t.Fatal("window still carries bundle or app")
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM window w JOIN app a ON a.id = w.app_id WHERE a.bundle = 'com.google.Chrome' AND a.name = 'Chrome'`); n != 3 {
+		t.Fatalf("Chrome windows under the latest window's name = %d, want 3", n)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM window w JOIN app a ON a.id = w.app_id WHERE a.bundle = '' AND a.name = 'term' AND w.title = 'zsh'`); n != 1 {
+		t.Fatalf("bundle-less window = %d, want 1", n)
+	}
+	for q, want := range map[string]int{
+		`SELECT COUNT(*) FROM placement`:                                                         4,
+		`SELECT COUNT(*) FROM placement WHERE closed_by IS NULL`:                                 3,
+		`SELECT COUNT(*) FROM binding`:                                                           3,
+		`SELECT COUNT(*) FROM owed WHERE window_id = 16 AND progress = 1`:                        1,
+		`SELECT COUNT(*) FROM event`:                                                             2,
+		`SELECT COUNT(*) FROM pragma_foreign_key_list('placement') WHERE "table" = 'space'`:      2,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'placement_current'`: 1,
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'window_app'`:        1,
+		`PRAGMA foreign_keys`: 1,
+	} {
+		if n := count(t, s, q); n != want {
+			t.Fatalf("%s = %d, want %d", q, n, want)
+		}
+	}
+	var violations int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil {
+		t.Fatal(err)
+	}
+	if violations != 0 {
+		t.Fatalf("foreign_key_check: %d violation(s)", violations)
+	}
+	st, err := s.Stored(1)
+	if err != nil || len(st) != 4 {
+		t.Fatalf("Stored(air) = %+v, %v; want all four windows", st, err)
+	}
+	// Reopening is a no-op at version 5.
+	s.Close()
+	if s2, err := Open(path); err != nil {
+		t.Fatalf("reopen: %v", err)
+	} else {
+		s2.Close()
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -51,6 +52,52 @@ var migrations = []string{
 	  payload TEXT    NOT NULL
 	); CREATE INDEX IF NOT EXISTS stream_at ON stream(at)`,
 	`DROP TABLE IF EXISTS disturbance`,
+	// 5: app owns window; placement's space is declared against space.
+	// Rebuilding tables that other tables reference needs foreign keys off
+	// (SQLite's ALTER TABLE procedure); the connection pool holds one
+	// connection, so the pragma applies to the statements that follow it.
+	`PRAGMA foreign_keys = OFF;
+	BEGIN;
+	CREATE TABLE app (
+	  id     INTEGER PRIMARY KEY,
+	  bundle TEXT NOT NULL,
+	  name   TEXT NOT NULL
+	);
+	CREATE UNIQUE INDEX app_key ON app(CASE WHEN bundle <> '' THEN 'b:' || bundle ELSE 'o:' || name END);
+	INSERT INTO app(bundle, name)
+	  SELECT bundle, app FROM (SELECT bundle, app, MAX(id) FROM window
+	    GROUP BY CASE WHEN bundle <> '' THEN 'b:' || bundle ELSE 'o:' || app END);
+	CREATE TABLE window_new (
+	  id         INTEGER PRIMARY KEY,
+	  app_id     INTEGER NOT NULL REFERENCES app(id),
+	  title      TEXT    NOT NULL,
+	  first_seen INTEGER NOT NULL
+	);
+	INSERT INTO window_new(id, app_id, title, first_seen)
+	  SELECT w.id, a.id, w.title, w.first_seen
+	  FROM window w JOIN app a
+	    ON (CASE WHEN w.bundle <> '' THEN 'b:' || w.bundle ELSE 'o:' || w.app END)
+	     = (CASE WHEN a.bundle <> '' THEN 'b:' || a.bundle ELSE 'o:' || a.name END);
+	DROP TABLE window;
+	ALTER TABLE window_new RENAME TO window;
+	CREATE INDEX window_app ON window(app_id);
+	CREATE TABLE placement_new (
+	  id             INTEGER PRIMARY KEY,
+	  window_id      INTEGER NOT NULL REFERENCES window(id),
+	  arrangement_id INTEGER NOT NULL REFERENCES arrangement(id),
+	  space          TEXT    NOT NULL,
+	  x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
+	  opened_by      INTEGER NOT NULL REFERENCES change(id),
+	  closed_by      INTEGER REFERENCES change(id),
+	  FOREIGN KEY (arrangement_id, space) REFERENCES space(arrangement_id, key)
+	);
+	INSERT INTO placement_new SELECT id, window_id, arrangement_id, space, x, y, w, h, opened_by, closed_by FROM placement;
+	DROP TABLE placement;
+	ALTER TABLE placement_new RENAME TO placement;
+	CREATE UNIQUE INDEX placement_current ON placement(window_id, arrangement_id) WHERE closed_by IS NULL;
+	PRAGMA user_version = 5;
+	COMMIT;
+	PRAGMA foreign_keys = ON;`,
 }
 
 func migrate(db *sql.DB) error {
@@ -58,6 +105,7 @@ func migrate(db *sql.DB) error {
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		return err
 	}
+	from := v
 	for ; v < len(migrations); v++ {
 		if _, err := db.Exec(migrations[v]); err != nil {
 			return fmt.Errorf("migration %d: %w", v+1, err)
@@ -65,6 +113,13 @@ func migrate(db *sql.DB) error {
 		if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, v+1)); err != nil {
 			return err
 		}
+	}
+	if from < 5 && v >= 5 && from > 0 {
+		var apps, wins int
+		if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM app), (SELECT COUNT(*) FROM window)`).Scan(&apps, &wins); err != nil {
+			return err
+		}
+		log.Printf("migrated to version %d: %d app(s), %d window(s) carried over", v, apps, wins)
 	}
 	return nil
 }
@@ -236,9 +291,30 @@ func apply(tx *sql.Tx, change, arr int64, boot, at time.Time, d arrangement.Deci
 	return nil
 }
 
+// appID returns the app row for a bundle, or for a name when there is no
+// bundle, creating it on first sight.
+func appID(tx *sql.Tx, bundle, name string) (int64, error) {
+	var id int64
+	err := tx.QueryRow(`SELECT id FROM app WHERE bundle = ?1 AND (?1 <> '' OR name = ?2)`, bundle, name).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+	res, err := tx.Exec(`INSERT INTO app(bundle, name) VALUES (?, ?)`, bundle, name)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
 func newWindow(tx *sql.Tx, boot, at time.Time, s arrangement.Seen) (int64, error) {
-	res, err := tx.Exec(`INSERT INTO window(bundle, app, title, first_seen) VALUES (?, ?, ?, ?)`,
-		s.Bundle, s.App, s.Title, at.UnixMilli())
+	app, err := appID(tx, s.Bundle, s.App)
+	if err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`INSERT INTO window(app_id, title, first_seen) VALUES (?, ?, ?)`, app, s.Title, at.UnixMilli())
 	if err != nil {
 		return 0, err
 	}
@@ -319,16 +395,17 @@ func (s *Store) RefreshTitles(boot time.Time, seen []arrangement.Seen) error {
 	return tx.Commit()
 }
 
-// Stored returns every window with a placement in the arrangement, with its
-// latest binding: the candidates for binding fresh ids.
+// Stored returns every window as a binding candidate, with its latest
+// binding and, when it has one, its open placement in the arrangement.
 func (s *Store) Stored(arr int64) ([]arrangement.Stored, error) {
 	rows, err := s.db.Query(`
-		SELECT w.id, w.bundle, w.app, w.title, p.space, p.x, p.y, p.w, p.h,
+		SELECT w.id, a.bundle, a.name, w.title,
+		       p.space IS NOT NULL, COALESCE(p.space, ''), COALESCE(p.x, 0), COALESCE(p.y, 0), COALESCE(p.w, 0), COALESCE(p.h, 0),
 		       COALESCE(b.boot, 0), COALESCE(b.wid, 0)
-		FROM placement p
-		JOIN window w ON w.id = p.window_id
+		FROM window w
+		JOIN app a ON a.id = w.app_id
+		LEFT JOIN placement p ON p.window_id = w.id AND p.arrangement_id = ?1 AND p.closed_by IS NULL
 		LEFT JOIN binding b ON b.rowid = (SELECT MAX(rowid) FROM binding WHERE window_id = w.id)
-		WHERE p.arrangement_id = ? AND p.closed_by IS NULL
 		ORDER BY w.id`, arr)
 	if err != nil {
 		return nil, err
@@ -337,7 +414,7 @@ func (s *Store) Stored(arr int64) ([]arrangement.Stored, error) {
 	var out []arrangement.Stored
 	for rows.Next() {
 		var o arrangement.Stored
-		if err := rows.Scan(&o.Window, &o.Bundle, &o.App, &o.Title, &o.Space, &o.Frame.X, &o.Frame.Y, &o.Frame.W, &o.Frame.H,
+		if err := rows.Scan(&o.Window, &o.Bundle, &o.App, &o.Title, &o.Placed, &o.Space, &o.Frame.X, &o.Frame.Y, &o.Frame.W, &o.Frame.H,
 			&o.Boot, &o.Binding); err != nil {
 			return nil, err
 		}
@@ -352,7 +429,8 @@ type Bound struct {
 	Seen   arrangement.Seen
 }
 
-// Bind gives stored windows their fresh ids and owes each its placement.
+// Bind gives stored windows their fresh ids and owes each with a placement
+// in the arrangement its placement.
 func (s *Store) Bind(arr int64, boot, at time.Time, cause string, bound []Bound) error {
 	if len(bound) == 0 {
 		return nil
@@ -372,10 +450,11 @@ func (s *Store) Bind(arr int64, boot, at time.Time, cause string, bound []Bound)
 			b.Window, boot.Unix(), b.Seen.Binding); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE window SET title = ?, app = ? WHERE id = ?`, b.Seen.Title, b.Seen.App, b.Window); err != nil {
+		if _, err := tx.Exec(`UPDATE window SET title = ? WHERE id = ?`, b.Seen.Title, b.Window); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`INSERT INTO owed(window_id, arrangement_id, progress, since) VALUES (?, ?, 0, ?)
+		if _, err := tx.Exec(`INSERT INTO owed(window_id, arrangement_id, progress, since)
+			SELECT ?1, ?2, 0, ?3 WHERE EXISTS (SELECT 1 FROM placement WHERE window_id = ?1 AND arrangement_id = ?2 AND closed_by IS NULL)
 			ON CONFLICT(window_id, arrangement_id) DO UPDATE SET progress = 0`, b.Window, arr, change); err != nil {
 			return err
 		}
@@ -435,8 +514,8 @@ func (s *Store) Journal(last int) ([]Entry, error) {
 }
 
 func (s *Store) events(change int64) ([]Event, error) {
-	rows, err := s.db.Query(`SELECT e.kind, w.app, w.title, e.window_id FROM event e JOIN window w ON w.id = e.window_id
-		WHERE e.change_id = ? ORDER BY e.id`, change)
+	rows, err := s.db.Query(`SELECT e.kind, a.name, w.title, e.window_id FROM event e JOIN window w ON w.id = e.window_id
+		JOIN app a ON a.id = w.app_id WHERE e.change_id = ? ORDER BY e.id`, change)
 	if err != nil {
 		return nil, err
 	}
