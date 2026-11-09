@@ -436,3 +436,124 @@ func TestModelOverviewEndInsideSpaceRunWaits(t *testing.T) {
 	}
 	expectNone(t, out, 100*time.Millisecond)
 }
+
+// dualPicture is testPicture with a second display D2 showing space s9, and
+// window 2 (Chrome "autobrr") on it.
+func dualPicture() *snapshot {
+	p := testPicture()
+	p.spaces = append(p.spaces, layout.SavedSpace{UUID: "s9", DisplayUUID: "D2"})
+	p.displays = append(p.displays, layout.CurrentDisplay{UUID: "D2", Spaces: []layout.CurrentSpace{{ID: 900, UUID: "s9"}}})
+	p.idToKey[900] = "s9"
+	p.current[900] = true
+	p.currentOf["D2"] = 900
+	p.windows = append(p.windows, layout.LiveWindow{ID: 2, OwnerPID: 11, OwnerName: "Google Chrome", BundleID: "com.google.Chrome", Title: "autobrr", Frame: dualFrame})
+	p.winSpace[2] = 900
+	p.all = append(p.all, layout.ListedWindow{ID: 2, OwnerName: "Google Chrome", Title: "autobrr"})
+	return p
+}
+
+var (
+	dualFrame   = layout.Rect{X: 1300, Y: 30, W: 1200, H: 1400}
+	laptopFrame = layout.Rect{X: 100, Y: 60, W: 900, H: 700}
+)
+
+func chromeWindow(wid uint32, f layout.Rect) layout.LiveWindow {
+	return layout.LiveWindow{ID: wid, OwnerPID: 30, OwnerName: "Google Chrome", BundleID: "com.google.Chrome", Title: "autobrr", Frame: f}
+}
+
+func mustArr(t *testing.T, st *store.Store, set string) int64 {
+	t.Helper()
+	arr, err := st.Arrangement(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return arr
+}
+
+// Boot 1 with two displays adopts Chrome on D2. Boot 2 on the laptop alone
+// restores Chrome under a new id at the laptop's default frame: it binds to
+// its record (the same window row) and takes a laptop placement. D2
+// returning then repairs it to the recorded dual frame.
+func TestModelLaptopBootBindsDualOnlyRecordAndDualReturnRepairsIt(t *testing.T) {
+	st := tempStore(t)
+	b := bus.New()
+	out := b.Subscribe("t", TargetChanged{}, PutWanted{})
+	m := newModel(b, st)
+	m.boot = func() time.Time { return time.Date(2026, 11, 7, 7, 0, 0, 0, time.UTC) }
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go m.run(ctx)
+	b.Publish(current(dualPicture()))
+	decisionsOf(t, out, 2) // startup adopts windows 1 and 2
+	cancel()
+	var chrome int64
+	rs, err := st.Recorded(mustArr(t, st, "D1,D2"), m.boot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rs {
+		if r.Binding == 2 {
+			chrome = r.Window
+		}
+	}
+	if chrome == 0 {
+		t.Fatal("Chrome has no record after boot 1")
+	}
+
+	m2 := newModel(b, st)
+	m2.boot = func() time.Time { return time.Date(2026, 11, 8, 7, 0, 0, 0, time.UTC) }
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	t.Cleanup(cancel2)
+	go m2.run(ctx2)
+	air := testPicture() // D1 only
+	air.windows = append(air.windows, chromeWindow(22, laptopFrame))
+	air.winSpace[22] = 100
+	air.all = append(air.all, layout.ListedWindow{ID: 22, OwnerName: "Google Chrome", Title: "autobrr"})
+	b.Publish(current(air))
+	ds := decisionsOf(t, out, 1)
+	var bound bool
+	for _, d := range ds {
+		if d.Seen.Binding == 22 {
+			bound = d.Kind == arrangement.Adopt && d.Window == chrome
+		}
+	}
+	if !bound {
+		t.Fatalf("laptop boot: decisions %+v; want Chrome adopted onto window %d", ds, chrome)
+	}
+	rs, _ = st.Recorded(mustArr(t, st, "D1"), m2.boot())
+	var placed bool
+	for _, r := range rs {
+		if r.Binding == 22 {
+			placed = r.Window == chrome && r.Placed && r.Space == "s1" && r.Frame == laptopFrame
+		}
+	}
+	if !placed {
+		t.Fatalf("laptop records %+v; want Chrome's row placed at the laptop frame on s1", rs)
+	}
+
+	// D2 returns: Chrome is back on s9 but still at the laptop frame.
+	dual := dualPicture()
+	dual.windows[1] = chromeWindow(22, laptopFrame)
+	delete(dual.winSpace, 2)
+	dual.winSpace[22] = 900
+	dual.all = []layout.ListedWindow{{ID: 1, OwnerName: "A", Title: "one"}, {ID: 22, OwnerName: "Google Chrome", Title: "autobrr"}}
+	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
+	b.Publish(current(dual))
+	b.Publish(Reconciled{Stamp: event.Now(), Cause: event.Name(DisplayQuiet{})})
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case e := <-out.C():
+			if p, ok := e.(PutWanted); ok {
+				for _, d := range p.Decisions {
+					if d.Seen.Binding == 22 && d.Window == chrome && d.Want.Space == "s9" && d.Want.Frame == dualFrame {
+						return
+					}
+				}
+				t.Fatalf("PutWanted %+v; want Chrome repaired to its dual frame", p.Decisions)
+			}
+		case <-deadline:
+			t.Fatal("no PutWanted after D2 returned")
+		}
+	}
+}
