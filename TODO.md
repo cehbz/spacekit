@@ -8,3 +8,9 @@
 - Restore by verdict: tail the unified log for WindowServer's `PKGWindowMoveOnMatchingDisplayChangedSeed window <hex> ... likely misplaced` lines and move just those window IDs back as they are flagged, instead of waiting for the burst to settle and re-matching every window. Precise and ~10 s faster; depends on a log string Apple can change, so keep the settle path as the fallback.
 - Multi-display space creation assumes SLS display order matches the Mission Control AX `mc.display` order. Held on this 2-display setup; revisit if it ever creates desktops on the wrong display.
 - AX-title fallback only covers the active space (AX enumerates ~current-space windows); full titles still need Screen Recording. Fine, just noting the ceiling.
+- Prompt for Screen Recording when `watch` starts without it (the TCC prompt is the one visible channel) and show the grant in `inspect`. Without it window titles come only from AX, which sees the current space.
+- A window whose space id is no longer in the space list gets an empty space key, and since `placement.space` now references `space` the whole `Apply` fails instead of recording that one window. Skip windows with no space key in `seenWindows` (watch.go) so the rest of the look still lands.
+- An app's display name is written once, when its row is created, and never updated. Refresh it on each look (or on `Prune`) so a renamed app reads right in `log` and `inspect`.
+- The latest-binding lookup in `Stored` (`MAX(rowid) ... WHERE window_id = ?`) has no index on `binding(window_id)`; fine at 300 windows, add the index if `Stored` shows up in a profile.
+- The migration runner should run `PRAGMA foreign_key_check` before `COMMIT` and roll back on a violation, so a bad rebuild can't commit.
+- `TestModelLaptopBootBindsDualOnlyRecordAndDualReturnRepairsIt` starts the second boot without waiting for the first model to finish, and drops the error from `Recorded`. Await the first model and check the error.
