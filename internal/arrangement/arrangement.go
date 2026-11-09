@@ -65,6 +65,7 @@ type Seen struct {
 type Look struct {
 	Windows []Seen
 	System  map[uint32]bool
+	Retry   bool // a fresh system cause: a window whose put was already attempted is put again rather than reported failed
 }
 
 type Kind int
@@ -88,12 +89,14 @@ type Decision struct {
 
 // Decide compares each seen window with its record. A window with no record
 // or no target is adopted where it is. A window at its target is clean (a
-// decision only when it was dirty). A window off target changed for a system
+// decision only when it was dirty). A dirty window off target that no put has
+// tried yet was marked by an explicit instruction (owe, undo, a reappearance)
+// and is put whatever the cause. A window off target changed for a system
 // cause (in look.System) is dirty and put, unless a put was already tried,
 // which is a failed put: the target stays and nothing more is ordered until
-// the next cause. A window off target with no system cause moved for the
-// user: the target follows it. Recorded windows the look did not see are left
-// alone.
+// the next cause; look.Retry is that next cause, and the window is put again.
+// A window off target with no system cause moved for the user: the target
+// follows it. Recorded windows the look did not see are left alone.
 func Decide(recorded []Recorded, look Look) []Decision {
 	byBinding := make(map[uint32]Recorded, len(recorded))
 	for _, r := range recorded {
@@ -111,9 +114,11 @@ func Decide(recorded []Recorded, look Look) []Decision {
 			if r.Dirty {
 				out = append(out, Decision{Kind: Clean, Window: r.Window, Seen: s})
 			}
+		case r.Dirty && r.Progress == Untried:
+			out = append(out, put(r, s))
 		case !look.System[s.Binding]:
 			out = append(out, Decision{Kind: Adopt, Window: r.Window, Seen: s})
-		case r.Dirty && r.Progress == Attempted:
+		case r.Dirty && r.Progress == Attempted && !look.Retry:
 			out = append(out, Decision{Kind: Failed, Window: r.Window, Seen: s, Want: r.Placement})
 		case r.Dirty:
 			out = append(out, put(r, s))

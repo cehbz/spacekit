@@ -373,6 +373,28 @@ func (s *Store) OweAll(arr int64, boot, at time.Time, cause string, live []uint3
 	return n, tx.Commit()
 }
 
+// DirtyUntried returns the window-server ids, in this boot, of the windows
+// marked dirty in the arrangement that no put has tried yet.
+func (s *Store) DirtyUntried(arr int64, boot time.Time) ([]uint32, error) {
+	rows, err := s.db.Query(`
+		SELECT b.wid FROM owed o JOIN binding b ON b.window_id = o.window_id
+		WHERE o.arrangement_id = ? AND o.progress = 0 AND b.boot = ?
+		ORDER BY b.wid`, arr, boot.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []uint32
+	for rows.Next() {
+		var wid uint32
+		if err := rows.Scan(&wid); err != nil {
+			return nil, err
+		}
+		out = append(out, wid)
+	}
+	return out, rows.Err()
+}
+
 // RefreshTitles records the latest title of each seen window bound in this
 // boot. A title is identity for later matching, not a placement, so this
 // writes no change.

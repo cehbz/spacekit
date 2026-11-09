@@ -269,7 +269,7 @@ func TestModelTrailingSettleAfterPutIsThePuts(t *testing.T) {
 		pg   time.Duration
 		want arrangement.Kind
 	}{
-		{"inside put grace", putGrace, arrangement.Failed},
+		{"inside put grace", time.Hour, arrangement.Failed},
 		{"no put grace", 0, arrangement.Adopt},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -679,5 +679,50 @@ func TestModelLaptopBootBindsDualOnlyRecordAndDualReturnPutsItBack(t *testing.T)
 		case <-deadline:
 			t.Fatal("no PutWanted after D2 returned")
 		}
+	}
+}
+
+// A settled display change is a fresh cause: a window whose put failed is put
+// again.
+func TestModelDisplaySettledRetriesAFailedPut(t *testing.T) {
+	b, out := startModel(t)
+	failedPutOfWindow2(t, b, out)
+	b.Publish(PutEnded{Stamp: event.Now()}) // the put did not take
+	if d := decisionsOf(t, out, 1)[0]; d.Kind != arrangement.Failed {
+		t.Fatalf("put ended: %+v, want a failed put", d)
+	}
+	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
+	b.Publish(DisplayQuiet{Stamp: event.Now()}) // Current unchanged: window 2 still off target
+	tc := expectEvent(t, out, TargetChanged{}, 2*time.Second).(TargetChanged)
+	if len(tc.Decisions) != 1 || tc.Decisions[0].Kind != arrangement.Put || tc.Decisions[0].Seen.Binding != 2 || !tc.Decisions[0].Resize {
+		t.Fatalf("display settled after a failed put: %+v, want a put resizing window 2", tc.Decisions)
+	}
+	pw := expectEvent(t, out, PutWanted{}, 2*time.Second).(PutWanted)
+	if len(pw.Decisions) != 1 || pw.Decisions[0].Seen.Binding != 2 {
+		t.Fatalf("put wanted %+v, want window 2", pw.Decisions)
+	}
+}
+
+// owe marks windows dirty with no put tried; the next tick puts them back
+// whatever moved them.
+func TestModelTickPutsWindowsMarkedByOwe(t *testing.T) {
+	st := tempStore(t)
+	b, out := startModelWith(t, st, displayGrace)
+	b.Publish(current(twoWindows()))
+	decisionsOf(t, out, 2)
+	moved := twoWindows()
+	moved.windows[1].Frame.X = 400 // hidden window 2, off target
+	b.Publish(current(moved))
+	if _, err := st.OweAll(mustArr(t, st, displaySet(moved.spaces)), bootTime(), time.Now(), "owe", []uint32{2}); err != nil {
+		t.Fatal(err)
+	}
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	tc := expectEvent(t, out, TargetChanged{}, 2*time.Second).(TargetChanged)
+	if len(tc.Decisions) != 1 || tc.Decisions[0].Kind != arrangement.Put || tc.Decisions[0].Seen.Binding != 2 || !tc.Decisions[0].Resize {
+		t.Fatalf("tick after owe: %+v, want a put of window 2 only", tc.Decisions)
+	}
+	pw := expectEvent(t, out, PutWanted{}, 2*time.Second).(PutWanted)
+	if len(pw.Decisions) != 1 || pw.Decisions[0].Seen.Binding != 2 {
+		t.Fatalf("put wanted %+v, want window 2", pw.Decisions)
 	}
 }

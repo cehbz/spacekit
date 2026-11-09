@@ -293,6 +293,31 @@ func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
 	}
 }
 
+func TestDirtyUntriedListsThisBootsMarkedWindows(t *testing.T) {
+	s := open(t)
+	arr := arrangementWith(t, s, "D1", "S1", "S2")
+	adoptNew(t, s, arr, 1, "S1", full)
+	b := adoptNew(t, s, arr, 2, "S1", full)
+	adoptNew(t, s, arr, 3, "S1", full)
+	if _, err := s.OweAll(arr, boot, t0, "owe", []uint32{1}); err != nil {
+		t.Fatal(err)
+	}
+	tried := []arrangement.Decision{
+		{Kind: arrangement.Dirty, Window: b.Window, Seen: seen(2, "S2", half)},
+		{Kind: arrangement.Put, Window: b.Window, Seen: seen(2, "S2", half), Want: arrangement.Placement{Space: "S1", Frame: full}, Move: true, Resize: true},
+	}
+	if err := s.Apply(arr, boot, t0, "display settled", tried); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := s.DirtyUntried(arr, boot)
+	if err != nil || len(ids) != 1 || ids[0] != 1 {
+		t.Fatalf("DirtyUntried = %v, %v; want [1]", ids, err)
+	}
+	if ids, _ := s.DirtyUntried(arr, boot.Add(time.Hour)); len(ids) != 0 {
+		t.Fatalf("another boot has nothing bound: %v", ids)
+	}
+}
+
 func TestRefreshTitles(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1")

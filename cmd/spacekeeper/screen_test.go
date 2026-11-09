@@ -221,6 +221,31 @@ func TestScreenRetriesStartupOnTick(t *testing.T) {
 	expectEvent(t, out, CurrentChanged{}, time.Second)
 }
 
+// A seed read taken inside Mission Control holds thumbnail frames: it is
+// skipped and the tick takes the next one.
+func TestScreenSeedWaitsOutTheOverview(t *testing.T) {
+	thumbs := testPicture()
+	thumbs.windows[0].Frame = layout.Rect{X: 40, Y: 40, W: 25, H: 25}
+	thumbs.all = append(thumbs.all, layout.ListedWindow{ID: 9, OwnerName: "WindowManager", Title: "ExposeShieldWindow"})
+	r := &fakeReader{pic: thumbs}
+	b := bus.New()
+	out := b.Subscribe("t", CurrentChanged{})
+	called := make(chan struct{}, 8)
+	sc := newScreen(b, r, func(fn func()) { fn(); called <- struct{}{} })
+	sc.send = func([]uint32) error { return nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go sc.run(ctx)
+	<-called // the seed's read
+	expectNone(t, out, 300*time.Millisecond)
+	r.pic = testPicture()
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
+	if len(pic.windows) != 1 || pic.windows[0].Frame.W != 100 {
+		t.Fatalf("seeded %+v, want window 1 at its real frame", pic.windows)
+	}
+}
+
 // shifted is testPicture with window 1 drawn 2624 points left: a read taken
 // during a space slide.
 func shifted() *snapshot {

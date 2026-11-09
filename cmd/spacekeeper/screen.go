@@ -71,7 +71,7 @@ func (s *screen) run(ctx context.Context) {
 }
 
 func (s *screen) handle(e event.Event) {
-	if s.pic == nil { // not started: the seed read failed
+	if s.pic == nil { // not started: the seed read failed or was deferred
 		if _, ok := e.(Tick); ok {
 			s.seed()
 		}
@@ -202,13 +202,18 @@ func (s *screen) publish(c WindowChanged) {
 }
 
 // seed takes the one read Current starts from. It is retried on the tick
-// while it fails.
+// while it fails or while the overview shows thumbnails, whose frames are not
+// the windows'.
 func (s *screen) seed() {
 	var fresh *snapshot
 	var err error
 	s.onMain(func() { fresh, err = s.r.readAll() })
 	if err != nil {
 		log.Printf("screen (startup): read failed: %v", err)
+		return
+	}
+	if layout.OverviewOpen(fresh.all) {
+		log.Printf("screen (startup): overview open, seed deferred")
 		return
 	}
 	s.pic = fresh

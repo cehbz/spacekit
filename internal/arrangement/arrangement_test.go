@@ -166,3 +166,24 @@ func TestDecideIgnoresRecordedWindowsNotSeen(t *testing.T) {
 	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{})
 	wantKinds(t, ds)
 }
+
+func TestDecideRetryPutsAnAttemptedWindowAgain(t *testing.T) {
+	r := []Recorded{dirtyRec(1, "S1", full, Attempted)}
+	ds := Decide(r, Look{Windows: []Seen{saw(1, "S1", shrunk)}, System: sys(1), Retry: true})
+	wantKinds(t, ds, Put)
+	if ds[0].Move || !ds[0].Resize || ds[0].Want != (Placement{"S1", full}) {
+		t.Fatalf("want a resize back to the target, got %+v", ds[0])
+	}
+	ds = Decide(r, Look{Windows: []Seen{saw(1, "S1", shrunk)}, System: sys(1)})
+	wantKinds(t, ds, Failed)
+}
+
+// A dirty window no put has tried yet was marked by an explicit instruction
+// (owe, undo, a reappearance): it is put whatever the cause of the decide.
+func TestDecideUntriedDirtyIsPutWhateverTheCause(t *testing.T) {
+	ds := Decide([]Recorded{dirtyRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S2", shrunk)}})
+	wantKinds(t, ds, Put)
+	if !ds[0].Move || !ds[0].Resize || ds[0].Want != (Placement{"S1", full}) {
+		t.Fatalf("want move and resize to the target, got %+v", ds[0])
+	}
+}

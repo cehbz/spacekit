@@ -16,7 +16,8 @@ import (
 // model decides Current against Target and is the only writer of Target. A
 // WindowQuiet decides that window; a DisplayQuiet decides every window
 // against the arrangement the displays now form; the first Current decides
-// at startup; a PutEnded decides the put's windows. It decides on the
+// at startup; a PutEnded decides the put's windows; a Tick decides the
+// windows marked dirty with no put tried (owe, undo). It decides on the
 // event-kept Current, never on a read. It holds while nothing seen is the
 // user's (locked, asleep, power-off announced), through a display run and
 // while a put runs; a decide that falls inside a hold is taken when the hold
@@ -53,7 +54,7 @@ type pendingDecide struct {
 // newModel subscribes at once.
 func newModel(b *bus.Bus, st *store.Store) *model {
 	return &model{b: b, st: st, boot: bootTime, grace: displayGrace, putGrace: putGrace,
-		sub: b.Subscribe("model", CurrentChanged{}, WindowQuiet{}, DisplayQuiet{}, DisplayBurstBegan{}, PutEnded{},
+		sub: b.Subscribe("model", CurrentChanged{}, WindowQuiet{}, DisplayQuiet{}, DisplayBurstBegan{}, PutEnded{}, Tick{},
 			event.SessionLocked{}, event.SessionUnlocked{}, event.ScreensSlept{}, event.ScreensWoke{},
 			event.SystemSleeping{}, event.SystemWoke{}, event.PoweringOff{})}
 }
@@ -87,6 +88,8 @@ func (m *model) handle(e event.Event) {
 		m.hold.display = false
 		m.displaySettled = time.Now()
 		m.decide("display settled", nil, true, nil)
+	case Tick:
+		m.decideMarked()
 	case DisplayBurstBegan:
 		m.hold.display = true
 		log.Printf("display change began; decides held")
@@ -130,6 +133,34 @@ func (m *model) handle(e event.Event) {
 	}
 }
 
+// decideMarked decides, as the system's, the windows in Current that are
+// marked dirty with no put tried (owe, undo): the explicit instruction to put
+// them back. Nothing marked, nothing decided.
+func (m *model) decideMarked() {
+	if m.pic == nil {
+		return
+	}
+	arr, err := m.st.Arrangement(displaySet(m.pic.spaces))
+	if err != nil {
+		log.Printf("decide (tick) failed: %v", err)
+		return
+	}
+	marked, err := m.st.DirtyUntried(arr, m.boot())
+	if err != nil {
+		log.Printf("decide (tick) failed: %v", err)
+		return
+	}
+	var ids []uint32
+	for _, id := range marked {
+		if _, ok := m.pic.window(id); ok {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) > 0 {
+		m.decide("tick", ids, true, nil)
+	}
+}
+
 func (m *model) held() bool {
 	h := m.hold
 	return m.pic == nil || h.locked || h.asleep || h.poweringOff || h.display || h.putting
@@ -157,8 +188,10 @@ func (m *model) release() {
 // and applies the outcome. system says the change behind this decide is the
 // system's (display change, put); also names windows whose change is the
 // system's; a window bound during it, or in a put that ended within
-// putGrace, is the system's in any case. A held decide is recorded per
-// window, and a system cause is not made the user's by a later held one.
+// putGrace, is the system's in any case. A full decide with a system cause is
+// a display settle, live or released from a hold: a fresh cause, so a window
+// whose put failed is put again. A held decide is recorded per window, and a
+// system cause is not made the user's by a later held one.
 func (m *model) decide(cause string, only []uint32, system bool, also map[uint32]bool) {
 	if m.held() {
 		m.pending.cause = cause
@@ -222,7 +255,7 @@ func (m *model) decide(cause string, only []uint32, system bool, also map[uint32
 			sys[s.Binding] = true
 		}
 	}
-	ds := arrangement.Decide(recorded, arrangement.Look{Windows: seen, System: sys})
+	ds := arrangement.Decide(recorded, arrangement.Look{Windows: seen, System: sys, Retry: only == nil && system})
 	saved, err := m.st.Spaces(arr)
 	if err != nil {
 		fail(err)
