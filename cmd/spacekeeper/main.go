@@ -285,6 +285,26 @@ func inspectCmd() error {
 	return nil
 }
 
+// window returns the window as the snapshot holds it, and whether it does.
+func (s *snapshot) window(wid uint32) (layout.LiveWindow, bool) {
+	for _, w := range s.windows {
+		if w.ID == wid {
+			return w, true
+		}
+	}
+	return layout.LiveWindow{}, false
+}
+
+// lists reports whether the snapshot's whole window list holds the window.
+func (s *snapshot) lists(wid uint32) bool {
+	for _, a := range s.all {
+		if a.ID == wid {
+			return true
+		}
+	}
+	return false
+}
+
 // clone is a deep copy: the screen publishes Current by value.
 func (s *snapshot) clone() *snapshot {
 	c := &snapshot{

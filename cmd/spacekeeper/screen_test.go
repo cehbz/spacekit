@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,96 +142,6 @@ func TestScreenDestroyRemoves(t *testing.T) {
 	}
 }
 
-func TestScreenReconcilesOnTick(t *testing.T) {
-	r := &fakeReader{pic: testPicture()}
-	b, _, out := startScreen(t, r, Difference{}, CurrentChanged{})
-	expectEvent(t, out, CurrentChanged{}, time.Second) // startup gather done
-	r.pic.windows[0].Frame.X = 500                     // the session moved behind the screen's back
-	b.Publish(Tick{Stamp: event.Now(), N: 1})
-	expectEvent(t, out, Difference{}, time.Second)
-	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
-	if pic.windows[0].Frame.X != 500 {
-		t.Fatal("Current not corrected")
-	}
-	if r.gathers != 2 {
-		t.Fatalf("gathers %d, want 2", r.gathers)
-	}
-}
-
-// A one-tick sample does not override the Dock's events: the marker
-// corrects the overview state only when two consecutive ticks disagree.
-func TestScreenCorrectsOverviewFromMarker(t *testing.T) {
-	r := &fakeReader{pic: testPicture()}
-	b, _, out := startScreen(t, r, event.OverviewShown{}, event.OverviewEnded{}, CurrentChanged{}, Reconciled{})
-	expectEvent(t, out, CurrentChanged{}, time.Second)
-	r.pic.all = append(r.pic.all, layout.ListedWindow{ID: 99, OwnerName: "WindowManager", Title: "ExposeShieldWindow"})
-	b.Publish(Tick{Stamp: event.Now(), N: 1})
-	expectCause(t, out, "tick") // one disagreeing tick: nothing corrected, Current kept
-	expectNone(t, out, 100*time.Millisecond)
-	b.Publish(Tick{Stamp: event.Now(), N: 2})
-	expectEvent(t, out, event.OverviewShown{}, time.Second) // the Dock never said so
-	expectCause(t, out, "tick")
-	b.Publish(Tick{Stamp: event.Now(), N: 3})
-	expectCause(t, out, "tick")              // Current is kept while the overview is open
-	expectNone(t, out, 100*time.Millisecond) // and no CurrentChanged
-	r.pic.all = r.pic.all[:1]
-	b.Publish(Tick{Stamp: event.Now(), N: 4})
-	expectCause(t, out, "tick")
-	expectNone(t, out, 100*time.Millisecond)
-	b.Publish(Tick{Stamp: event.Now(), N: 5})
-	expectEvent(t, out, event.OverviewEnded{}, time.Second)
-	expectCause(t, out, "tick")
-	expectEvent(t, out, CurrentChanged{}, time.Second)
-	if e := expectEvent(t, out, Reconciled{}, time.Second).(Reconciled); e.Cause != "overview ended" {
-		t.Fatalf("cause %q", e.Cause)
-	}
-	expectNone(t, out, 150*time.Millisecond)
-}
-
-// A tick that agrees with the state breaks a run of disagreeing ones.
-func TestScreenMarkerDisagreementsMustBeConsecutive(t *testing.T) {
-	r := &fakeReader{pic: testPicture()}
-	b, _, out := startScreen(t, r, event.OverviewShown{}, event.OverviewEnded{}, CurrentChanged{}, Reconciled{})
-	expectEvent(t, out, CurrentChanged{}, time.Second)
-	shield := layout.ListedWindow{ID: 99, OwnerName: "WindowManager", Title: "ExposeShieldWindow"}
-	r.pic.all = append(r.pic.all, shield)
-	b.Publish(Tick{Stamp: event.Now(), N: 1})
-	expectCause(t, out, "tick")
-	r.pic.all = r.pic.all[:1] // safe: the screen is idle after publishing
-	b.Publish(Tick{Stamp: event.Now(), N: 2})
-	expectEvent(t, out, CurrentChanged{}, time.Second)
-	expectCause(t, out, "tick")
-	r.pic.all = append(r.pic.all, shield)
-	b.Publish(Tick{Stamp: event.Now(), N: 3})
-	expectCause(t, out, "tick")
-	expectNone(t, out, 100*time.Millisecond)
-}
-
-// The Dock speaking between two disagreeing ticks breaks the run: the
-// second tick disagrees with the state the Dock set, not the first's.
-func TestScreenDockEventResetsMarkerDisagreements(t *testing.T) {
-	r := &fakeReader{pic: testPicture()}
-	b, _, out := startScreen(t, r, event.OverviewShown{}, event.OverviewEnded{}, CurrentChanged{}, Reconciled{})
-	expectEvent(t, out, CurrentChanged{}, time.Second)
-	r.pic.all = append(r.pic.all, layout.ListedWindow{ID: 99, OwnerName: "WindowManager", Title: "ExposeShieldWindow"})
-	b.Publish(Tick{Stamp: event.Now(), N: 1}) // marker open, state closed
-	expectCause(t, out, "tick")
-	b.Publish(event.OverviewShown{Stamp: event.Now()}) // the Dock: state open
-	expectEvent(t, out, event.OverviewShown{}, time.Second)
-	r.pic.all = r.pic.all[:1]                 // safe: handling OverviewShown reads nothing from the reader
-	b.Publish(Tick{Stamp: event.Now(), N: 2}) // marker closed, state open
-	expectCause(t, out, "tick")
-	expectNone(t, out, 100*time.Millisecond)
-}
-
-func TestScreenStartupInsideOverviewSaysSo(t *testing.T) {
-	r := &fakeReader{pic: testPicture()}
-	r.pic.all = append(r.pic.all, layout.ListedWindow{ID: 99, OwnerName: "WindowManager", Title: "ExposeShieldWindow"})
-	_, _, out := startScreen(t, r, event.OverviewShown{}, CurrentChanged{})
-	expectEvent(t, out, event.OverviewShown{}, time.Second)
-	expectEvent(t, out, CurrentChanged{}, time.Second)
-}
-
 // Current goes out before the change, so whatever a consumer publishes in
 // reaction to the change reaches the model after the Current it describes.
 func TestScreenPublishesCurrentBeforeChange(t *testing.T) {
@@ -242,45 +153,6 @@ func TestScreenPublishesCurrentBeforeChange(t *testing.T) {
 	b.Publish(event.WindowMoved{Stamp: event.Now(), Window: 1})
 	expectEvent(t, out, CurrentChanged{}, time.Second)
 	expectEvent(t, out, WindowChanged{}, time.Second)
-}
-
-// expectCause expects the next event to be Reconciled for this cause.
-func expectCause(t *testing.T, out *bus.Subscription, cause string) {
-	t.Helper()
-	if e := expectEvent(t, out, Reconciled{}, time.Second).(Reconciled); e.Cause != cause {
-		t.Fatalf("cause %q, want %q", e.Cause, cause)
-	}
-}
-
-func TestScreenReconciledAfterFailedGather(t *testing.T) {
-	r := &fakeReader{pic: testPicture()}
-	b, _, out := startScreen(t, r, CurrentChanged{}, Reconciled{})
-	expectEvent(t, out, CurrentChanged{}, time.Second)
-	r.gatherErrs = 1 // safe: the screen is idle after publishing
-	b.Publish(DisplayQuiet{Stamp: event.Now()})
-	expectCause(t, out, "display quiet")
-	expectNone(t, out, 100*time.Millisecond)
-}
-
-func TestScreenQuietBeforeStartupIsReconciled(t *testing.T) {
-	r := &fakeReader{pic: testPicture(), gatherErrs: 1}
-	b, _, out := startScreen(t, r, CurrentChanged{}, Reconciled{})
-	b.Publish(DisplayQuiet{Stamp: event.Now()})
-	expectCause(t, out, "display quiet")
-	expectNone(t, out, 100*time.Millisecond)
-}
-
-func TestScreenReconciledNamesCause(t *testing.T) {
-	r := &fakeReader{pic: testPicture()}
-	b, _, out := startScreen(t, r, Difference{}, CurrentChanged{}, Reconciled{})
-	expectEvent(t, out, CurrentChanged{}, time.Second)
-	r.pic.windows[0].Frame.X = 500
-	b.Publish(Tick{Stamp: event.Now(), N: 1})
-	expectEvent(t, out, Difference{}, time.Second)
-	expectEvent(t, out, CurrentChanged{}, time.Second)
-	if e := expectEvent(t, out, Reconciled{}, time.Second).(Reconciled); e.Cause != "tick" {
-		t.Fatalf("cause %q", e.Cause)
-	}
 }
 
 func TestScreenSpaceEventRereadsSpaceList(t *testing.T) {
@@ -347,6 +219,183 @@ func TestScreenRetriesStartupOnTick(t *testing.T) {
 	expectNone(t, out, 100*time.Millisecond)
 	b.Publish(Tick{Stamp: event.Now(), N: 1})
 	expectEvent(t, out, CurrentChanged{}, time.Second)
+}
+
+// shifted is testPicture with window 1 drawn 2624 points left: a read taken
+// during a space slide.
+func shifted() *snapshot {
+	p := testPicture()
+	p.windows[0].Frame.X -= 2624
+	return p
+}
+
+func TestScreenValidateDoesNotReplaceCurrent(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, sc, out := startScreen(t, r, CurrentChanged{}, Difference{})
+	expectEvent(t, out, CurrentChanged{}, time.Second) // the seed
+	r.pic = shifted()
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	d := expectEvent(t, out, Difference{}, time.Second).(Difference)
+	if !strings.Contains(d.Text, "window 1") {
+		t.Fatalf("difference %q, want it to name window 1", d.Text)
+	}
+	expectNone(t, out, 200*time.Millisecond)
+	if sc.pic.windows[0].Frame.X != 0 {
+		t.Fatalf("Current window 1 at x=%v after one differing validation, want 0", sc.pic.windows[0].Frame.X)
+	}
+}
+
+func TestScreenValidateAdoptsOnlyARepeatedDifference(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, sc, out := startScreen(t, r, CurrentChanged{}, WindowChanged{}, Difference{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	moved := testPicture()
+	moved.windows[0].Frame.X = 300
+	r.pic = moved
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	expectEvent(t, out, Difference{}, time.Second)
+	expectNone(t, out, 200*time.Millisecond)
+	other := testPicture()
+	other.windows[0].Frame.X = 600 // a different difference: still not adopted
+	r.pic = other
+	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	expectEvent(t, out, Difference{}, time.Second)
+	expectNone(t, out, 200*time.Millisecond)
+	b.Publish(Tick{Stamp: event.Now(), N: 3}) // the same difference again: adopted
+	expectEvent(t, out, Difference{}, time.Second)
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	c := expectEvent(t, out, WindowChanged{}, time.Second).(WindowChanged)
+	if c.Window != 1 || c.Frame.X != 600 || sc.pic.windows[0].Frame.X != 600 {
+		t.Fatalf("adopted %+v, Current x=%v; want window 1 at 600", c, sc.pic.windows[0].Frame.X)
+	}
+}
+
+func TestScreenValidateAdoptsAMissedWindow(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, sc, out := startScreen(t, r, CurrentChanged{}, WindowChanged{}, Difference{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	with := testPicture()
+	with.windows = append(with.windows, layout.LiveWindow{ID: 2, OwnerPID: 11, OwnerName: "B", Title: "two", Frame: layout.Rect{X: 1, Y: 1, W: 300, H: 300}})
+	with.winSpace[2] = 200
+	with.all = append(with.all, layout.ListedWindow{ID: 2, OwnerName: "B", Title: "two"})
+	r.pic = with
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	expectEvent(t, out, Difference{}, time.Second)
+	expectNone(t, out, 200*time.Millisecond)
+	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	expectEvent(t, out, Difference{}, time.Second)
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	c := expectEvent(t, out, WindowChanged{}, time.Second).(WindowChanged)
+	if c.Window != 2 || c.Space != 200 || len(sc.pic.windows) != 2 {
+		t.Fatalf("adopted %+v, Current has %d windows; want window 2 on 200", c, len(sc.pic.windows))
+	}
+}
+
+func TestScreenValidateRemovesAWindowGoneTwice(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, sc, out := startScreen(t, r, CurrentChanged{}, WindowChanged{}, Difference{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	empty := testPicture()
+	empty.windows = nil
+	empty.all = nil
+	delete(empty.winSpace, 1)
+	r.pic = empty
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	expectEvent(t, out, Difference{}, time.Second)
+	expectNone(t, out, 200*time.Millisecond)
+	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	expectEvent(t, out, Difference{}, time.Second)
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	c := expectEvent(t, out, WindowChanged{}, time.Second).(WindowChanged)
+	if c.Window != 1 || !c.Gone || len(sc.pic.windows) != 0 {
+		t.Fatalf("removed %+v, Current has %d windows; want window 1 gone", c, len(sc.pic.windows))
+	}
+}
+
+// Mission Control held open across two validations shows the same
+// thumbnail frames to both: neither is compared, so nothing is adopted.
+func TestScreenValidateInsideOverviewChangesNothing(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, sc, out := startScreen(t, r, CurrentChanged{}, WindowChanged{}, Difference{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	thumbs := testPicture()
+	thumbs.windows[0].Frame = layout.Rect{X: 40, Y: 40, W: 25, H: 25}
+	thumbs.all = append(thumbs.all, layout.ListedWindow{ID: 9, OwnerName: "WindowManager", Title: "ExposeShieldWindow"})
+	r.pic = thumbs
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	expectNone(t, out, 200*time.Millisecond)
+	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	expectNone(t, out, 200*time.Millisecond)
+	if sc.pic.windows[0].Frame.W != 100 {
+		t.Fatalf("Current took the thumbnail frame %v", sc.pic.windows[0].Frame)
+	}
+}
+
+// A run of the same difference breaks when a validation agrees with Current.
+func TestScreenValidateRunBreaksOnAgreement(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, sc, out := startScreen(t, r, CurrentChanged{}, WindowChanged{}, Difference{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	moved := testPicture()
+	moved.windows[0].Frame.X = 300
+	r.pic = moved
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	expectEvent(t, out, Difference{}, time.Second)
+	expectNone(t, out, 200*time.Millisecond)
+	r.pic = testPicture()
+	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	b.Publish(event.SpaceSwitched{Stamp: event.Now()}) // a synchronisation point: tick 2 is done when Current is published
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	r.pic = moved
+	b.Publish(Tick{Stamp: event.Now(), N: 3})
+	expectEvent(t, out, Difference{}, time.Second)
+	expectNone(t, out, 200*time.Millisecond)
+	if sc.pic.windows[0].Frame.X != 0 {
+		t.Fatalf("Current window 1 at x=%v after a broken run, want 0", sc.pic.windows[0].Frame.X)
+	}
+}
+
+// Spaces follow space events: a window read on a space Current does not
+// know is not adopted.
+func TestScreenValidateSkipsAWindowOnAnUnknownSpace(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, sc, out := startScreen(t, r, CurrentChanged{}, WindowChanged{}, Difference{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	with := testPicture()
+	with.windows = append(with.windows, layout.LiveWindow{ID: 2, OwnerPID: 11, OwnerName: "B", Title: "two", Frame: layout.Rect{X: 1, Y: 1, W: 300, H: 300}})
+	with.winSpace[2] = 300
+	with.all = append(with.all, layout.ListedWindow{ID: 2, OwnerName: "B", Title: "two"})
+	r.pic = with
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	expectEvent(t, out, Difference{}, time.Second)
+	expectNone(t, out, 200*time.Millisecond)
+	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	expectEvent(t, out, Difference{}, time.Second)
+	expectNone(t, out, 200*time.Millisecond)
+	if len(sc.pic.windows) != 1 {
+		t.Fatalf("Current has %d windows, want window 2 left out", len(sc.pic.windows))
+	}
+}
+
+// A listed window that was never placeable sends no destroy event once it
+// is out of the request set; two reads without it drop it from the list.
+func TestScreenValidateDropsAWindowUnlistedTwice(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	r.pic.all = append(r.pic.all, layout.ListedWindow{ID: 7, OwnerName: "Tiny"})
+	b, sc, out := startScreen(t, r, CurrentChanged{}, WindowChanged{}, Difference{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	r.pic = testPicture()
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	expectNone(t, out, 200*time.Millisecond)
+	if !sc.pic.lists(7) {
+		t.Fatal("window 7 dropped after one read without it")
+	}
+	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	all := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current.all
+	if len(all) != 1 || all[0].ID != 1 || sc.pic.lists(7) {
+		t.Fatalf("all = %+v, want window 7 dropped", all)
+	}
+	expectNone(t, out, 200*time.Millisecond)
 }
 
 func TestWatchedSetCaps(t *testing.T) {

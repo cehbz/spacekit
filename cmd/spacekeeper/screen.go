@@ -30,10 +30,8 @@ func (liveReader) spaceList() ([]skylight.Display, error)                 { retu
 
 // screen keeps Current from the window server's events and publishes it by
 // value after every change. It owns the per-window request set, kept at
-// every placeable window it knows, and tracks the overview state so that
-// reconciliation can correct it from the shield-window marker when two
-// consecutive reconciles disagree with it: a sample a minute apart must not
-// override the Dock's sub-second events.
+// every placeable window it knows. The tick validates Current against a read
+// of the screen.
 type screen struct {
 	b                        *bus.Bus
 	sub                      *bus.Subscription
@@ -42,22 +40,23 @@ type screen struct {
 	send                     func([]uint32) error
 	pic                      *snapshot
 	set                      watched
-	overview                 bool
-	markerDisagreements      int // reconciles whose marker disagreed with overview, with no overview event between
+	pending                  map[uint32]*layout.LiveWindow // last validation's differences: the window as read, nil when gone
+	pendingSpace             map[uint32]uint64
+	pendingGone              map[uint32]bool // listed windows the last validation's read did not list
 	sendFailing, overflowing bool
 }
 
-// newScreen subscribes at once; run takes the first gather.
+// newScreen subscribes at once; run takes the seed read.
 func newScreen(b *bus.Bus, r reader, onMain func(func())) *screen {
 	return &screen{b: b, r: r, onMain: onMain, send: skylight.RequestWindowNotifications,
 		sub: b.Subscribe("screen", event.WindowAttached{}, event.WindowDetached{}, event.WindowMoved{}, event.WindowResized{},
 			event.WindowDestroyed{}, event.SpaceCreated{}, event.SpaceDestroyed{}, event.SpaceSwitched{}, event.DisplayReconfigured{},
-			event.OverviewShown{}, event.OverviewEnded{}, Tick{}, SpaceQuiet{}, DisplayQuiet{})}
+			Tick{})}
 }
 
 func (s *screen) run(ctx context.Context) {
 	defer s.sub.Close()
-	s.reconcile("startup", false)
+	s.seed()
 	for {
 		select {
 		case <-ctx.Done():
@@ -72,22 +71,17 @@ func (s *screen) run(ctx context.Context) {
 }
 
 func (s *screen) handle(e event.Event) {
-	if s.pic == nil { // not started: the startup gather failed
-		switch e.(type) {
-		case Tick:
-			s.reconcile("startup", false)
-		case SpaceQuiet, DisplayQuiet, event.OverviewEnded: // nothing to reconcile yet
-			s.b.Publish(Reconciled{Stamp: event.Now(), Cause: event.Name(e)})
+	if s.pic == nil { // not started: the seed read failed
+		if _, ok := e.(Tick); ok {
+			s.seed()
 		}
 		return
 	}
 	switch e := e.(type) {
 	case Tick:
-		s.reconcile(event.Name(e), true)
+		s.validate(event.Name(e))
 	case event.SpaceCreated, event.SpaceDestroyed, event.SpaceSwitched, event.DisplayReconfigured:
 		s.readSpaces()
-	case SpaceQuiet, DisplayQuiet:
-		s.reconcile(event.Name(e), true)
 	case event.WindowAttached:
 		s.readOne(e.Window)
 	case event.WindowMoved:
@@ -100,13 +94,6 @@ func (s *screen) handle(e event.Event) {
 		}
 	case event.WindowDestroyed:
 		s.remove(e.Window, false)
-	case event.OverviewShown: // the Dock speaking breaks a run of disagreeing markers
-		s.overview = true
-		s.markerDisagreements = 0
-	case event.OverviewEnded:
-		s.overview = false
-		s.markerDisagreements = 0
-		s.reconcile(event.Name(e), true)
 	}
 }
 
@@ -214,61 +201,157 @@ func (s *screen) publish(c WindowChanged) {
 	s.b.Publish(c)
 }
 
-// reconcile replaces Current with one gather. With report, each difference
-// is logged and published, the measure of how faithfully the events keep
-// Current; a reconcile whose marker disagrees with the overview state keeps
-// Current, and the second consecutive one corrects the state.
-// With report, Reconciled follows on every exit, after any CurrentChanged.
-func (s *screen) reconcile(why string, report bool) {
-	if report {
-		defer func() { s.b.Publish(Reconciled{Stamp: event.Now(), Cause: why}) }()
-	}
+// seed takes the one read Current starts from. It is retried on the tick
+// while it fails.
+func (s *screen) seed() {
 	var fresh *snapshot
 	var err error
 	s.onMain(func() { fresh, err = s.r.gather() })
 	if err != nil {
-		log.Printf("screen (%s): gather failed: %v", why, err)
+		log.Printf("screen (startup): read failed: %v", err)
 		return
-	}
-	marker := layout.OverviewOpen(fresh.all)
-	if s.pic == nil || !report {
-		s.overview = marker
-		if s.pic == nil && marker { // started inside the overview: the Dock said so before we listened
-			s.b.Publish(event.OverviewShown{Stamp: event.Now()})
-		}
-	} else {
-		if marker != s.overview {
-			s.markerDisagreements++
-			log.Printf("screen (%s): overview marker %v, state %v (%d)", why, marker, s.overview, s.markerDisagreements)
-			if s.markerDisagreements < 2 {
-				return
-			}
-			s.markerDisagreements = 0
-			s.overview = marker
-			if marker {
-				s.b.Publish(event.OverviewShown{Stamp: event.Now()})
-			} else { // the event coming back reconciles
-				s.b.Publish(event.OverviewEnded{Stamp: event.Now()})
-			}
-			return
-		}
-		s.markerDisagreements = 0
-		if marker { // the overview shows thumbnail frames: keep Current
-			return
-		}
-		for _, d := range differences(s.pic, fresh) {
-			log.Printf("screen (%s): %s", why, d)
-			s.b.Publish(Difference{Stamp: event.Now(), Text: d})
-		}
 	}
 	s.pic = fresh
 	s.request()
 	s.b.Publish(CurrentChanged{Stamp: event.Now(), Current: s.pic.clone()})
 }
 
+// validate compares a read of the screen with Current. Every difference is
+// logged and published, the measure of how well the events keep Current.
+// Current is not replaced: a difference is adopted only when the previous
+// validation reported the same one for that window, so a read taken while
+// the screen is in motion (a space slide) changes nothing, and a missed
+// event is caught one validation late. A failed read, or one taken while the
+// overview shows thumbnails, compares nothing and leaves the previous
+// validation's differences standing, so consecutive validations span it.
+// A window read on a space Current does not know waits for the space event.
+func (s *screen) validate(cause string) {
+	var fresh *snapshot
+	var err error
+	s.onMain(func() { fresh, err = s.r.gather() })
+	if err != nil {
+		log.Printf("validate (%s): read failed: %v", cause, err)
+		return
+	}
+	if layout.OverviewOpen(fresh.all) {
+		log.Printf("validate (%s): overview open, nothing compared", cause)
+		return
+	}
+	next := map[uint32]*layout.LiveWindow{}
+	nextSpace := map[uint32]uint64{}
+	var adopt []difference
+	for _, d := range differences(s.pic, fresh) {
+		log.Printf("validate (%s): %s", cause, d.text)
+		s.b.Publish(Difference{Stamp: event.Now(), Text: d.text})
+		if d.window == 0 {
+			continue // spaces follow space events; a difference there is only reported
+		}
+		w, placed := fresh.window(d.window)
+		if placed {
+			next[d.window] = &w
+			nextSpace[d.window] = fresh.winSpace[d.window]
+		} else {
+			next[d.window] = nil
+		}
+		prev, seen := s.pending[d.window]
+		switch {
+		case !seen:
+		case prev == nil && !placed:
+			adopt = append(adopt, d)
+		case prev != nil && placed && s.pendingSpace[d.window] == fresh.winSpace[d.window] && arrangement.SameFrame(prev.Frame, w.Frame) &&
+			s.knownSpace(d.window, fresh):
+			adopt = append(adopt, d)
+		}
+	}
+	s.pending, s.pendingSpace = next, nextSpace
+	for _, d := range adopt {
+		log.Printf("validate (%s): adopted %s", cause, d.text)
+		if w := next[d.window]; w != nil {
+			s.put(*w, nextSpace[d.window], fresh)
+		} else {
+			s.remove(d.window, fresh.lists(d.window))
+		}
+		delete(s.pending, d.window)
+	}
+	s.unlist(cause, fresh)
+}
+
+// knownSpace reports whether Current knows the space fresh read the window
+// on; a fullscreen window's space is its display's.
+func (s *screen) knownSpace(wid uint32, fresh *snapshot) bool {
+	if _, fs := fresh.fsWindow[wid]; fs {
+		return true
+	}
+	_, ok := s.pic.idToKey[fresh.winSpace[wid]]
+	return ok
+}
+
+// unlist drops from the whole window list every window two consecutive
+// reads did not list. A window out of the request set sends no destroy
+// event, so the read is what tells Current it is gone.
+func (s *screen) unlist(cause string, fresh *snapshot) {
+	listed := make(map[uint32]bool, len(fresh.all))
+	for _, a := range fresh.all {
+		listed[a.ID] = true
+	}
+	gone := map[uint32]bool{}
+	kept := make([]layout.ListedWindow, 0, len(s.pic.all))
+	for _, a := range s.pic.all {
+		switch {
+		case listed[a.ID]:
+		case s.pendingGone[a.ID]:
+			log.Printf("validate (%s): adopted: window %d is no longer listed", cause, a.ID)
+			continue
+		default:
+			gone[a.ID] = true
+		}
+		kept = append(kept, a)
+	}
+	s.pendingGone = gone
+	if len(kept) == len(s.pic.all) {
+		return
+	}
+	s.pic.all = kept
+	s.b.Publish(CurrentChanged{Stamp: event.Now(), Current: s.pic.clone()})
+}
+
+// put places one window in Current as fresh read it (its listing, title,
+// frame and space) and publishes the change.
+func (s *screen) put(w layout.LiveWindow, space uint64, fresh *snapshot) {
+	delete(s.pic.fsWindow, w.ID)
+	if d, fs := fresh.fsWindow[w.ID]; fs {
+		delete(s.pic.winSpace, w.ID)
+		s.pic.fsWindow[w.ID] = d
+	} else {
+		s.pic.winSpace[w.ID] = space
+	}
+	replaced := false
+	for i := range s.pic.windows {
+		if s.pic.windows[i].ID == w.ID {
+			s.pic.windows[i] = w
+			replaced = true
+		}
+	}
+	if !replaced {
+		s.pic.windows = append(s.pic.windows, w)
+	}
+	if !s.pic.lists(w.ID) {
+		s.pic.all = append(s.pic.all, layout.ListedWindow{ID: w.ID, OwnerName: w.OwnerName, Title: w.Title})
+	}
+	s.request()
+	s.publish(WindowChanged{Stamp: event.Now(), Window: w.ID, Space: s.pic.winSpace[w.ID], Frame: w.Frame})
+}
+
+// difference is one thing validation found Current had wrong: window names
+// the window, 0 for a space difference.
+type difference struct {
+	window uint32
+	text   string
+}
+
 // differences lists what Current got wrong, one line each.
-func differences(have, want *snapshot) []string {
-	var out []string
+func differences(have, want *snapshot) []difference {
+	var out []difference
 	byID := func(ws []layout.LiveWindow) map[uint32]layout.LiveWindow {
 		m := make(map[uint32]layout.LiveWindow, len(ws))
 		for _, w := range ws {
@@ -287,12 +370,12 @@ func differences(have, want *snapshot) []string {
 		hw, ok := h[id]
 		switch {
 		case !ok:
-			out = append(out, fmt.Sprintf("missed window %d %s | %s", id, ww.OwnerName, ww.Title))
+			out = append(out, difference{id, fmt.Sprintf("missed window %d %s | %s", id, ww.OwnerName, ww.Title)})
 		case have.winSpace[id] != want.winSpace[id]:
-			out = append(out, fmt.Sprintf("window %d %s on space %d, had %d", id, ww.OwnerName, want.winSpace[id], have.winSpace[id]))
+			out = append(out, difference{id, fmt.Sprintf("window %d %s on space %d, had %d", id, ww.OwnerName, want.winSpace[id], have.winSpace[id])})
 		case !arrangement.SameFrame(hw.Frame, ww.Frame):
-			out = append(out, fmt.Sprintf("window %d %s at %.0f,%.0f %.0fx%.0f, had %.0f,%.0f %.0fx%.0f", id, ww.OwnerName,
-				ww.Frame.X, ww.Frame.Y, ww.Frame.W, ww.Frame.H, hw.Frame.X, hw.Frame.Y, hw.Frame.W, hw.Frame.H))
+			out = append(out, difference{id, fmt.Sprintf("window %d %s at %.0f,%.0f %.0fx%.0f, had %.0f,%.0f %.0fx%.0f", id, ww.OwnerName,
+				ww.Frame.X, ww.Frame.Y, ww.Frame.W, ww.Frame.H, hw.Frame.X, hw.Frame.Y, hw.Frame.W, hw.Frame.H)})
 		}
 	}
 	ids = ids[:0]
@@ -303,11 +386,11 @@ func differences(have, want *snapshot) []string {
 	for _, id := range ids {
 		hw := h[id]
 		if _, ok := w[id]; !ok {
-			out = append(out, fmt.Sprintf("kept window %d %s | %s that is gone", id, hw.OwnerName, hw.Title))
+			out = append(out, difference{id, fmt.Sprintf("kept window %d %s | %s that is gone", id, hw.OwnerName, hw.Title)})
 		}
 	}
 	if len(have.spaces) != len(want.spaces) {
-		out = append(out, fmt.Sprintf("%d spaces, had %d", len(want.spaces), len(have.spaces)))
+		out = append(out, difference{0, fmt.Sprintf("%d spaces, had %d", len(want.spaces), len(have.spaces))})
 	}
 	disps := make([]string, 0, len(want.currentOf))
 	for d := range want.currentOf {
@@ -317,7 +400,7 @@ func differences(have, want *snapshot) []string {
 	for _, d := range disps {
 		cur := want.currentOf[d]
 		if have.currentOf[d] != cur {
-			out = append(out, fmt.Sprintf("display %.8s shows space %d, had %d", d, cur, have.currentOf[d]))
+			out = append(out, difference{0, fmt.Sprintf("display %.8s shows space %d, had %d", d, cur, have.currentOf[d])})
 		}
 	}
 	return out
@@ -339,7 +422,7 @@ func (s *screen) request() {
 	s.sendFailing = err != nil
 	n := s.set.Overflow()
 	if n > 0 && !s.overflowing {
-		log.Printf("watching %d windows; %d more are left to reconciliation", watchedCap, n)
+		log.Printf("watching %d windows; %d more are left to validation", watchedCap, n)
 	}
 	s.overflowing = n > 0
 }
