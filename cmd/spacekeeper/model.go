@@ -135,9 +135,11 @@ func (m *model) handle(e event.Event) {
 
 // decideMarked decides, as the system's, the windows in Current that are
 // marked dirty with no put tried (owe, undo): the explicit instruction to put
-// them back. Nothing marked, nothing decided.
+// them back. Nothing marked, nothing decided. A held model skips the tick:
+// Current may show a display set mid-change, and the decide that ends the
+// hold puts marked windows anyway.
 func (m *model) decideMarked() {
-	if m.pic == nil {
+	if m.held() {
 		return
 	}
 	arr, err := m.st.Arrangement(displaySet(m.pic.spaces))
@@ -269,7 +271,9 @@ func (m *model) decide(cause string, only []uint32, system bool, also map[uint32
 			continue
 		}
 		if _, ok := resolved[d.Want.Space]; !ok {
-			d.Move, d.Resize = false, false // the space is gone: left where it is, no progress recorded
+			// the space is gone: nothing to order; a failed put, so the mark
+			// records an attempt and a user move adopts it
+			d.Kind, d.Move, d.Resize = arrangement.Failed, false, false
 			continue
 		}
 		if d.Move || d.Resize {

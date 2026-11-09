@@ -245,6 +245,26 @@ func TestFailedKeepsTheTarget(t *testing.T) {
 	}
 }
 
+// A failed put records an attempt, so the window leaves the untried marks.
+func TestFailedMarksAnAttempt(t *testing.T) {
+	s := open(t)
+	arr := arrangementWith(t, s, "D1", "S1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	failed := []arrangement.Decision{
+		{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)},
+		{Kind: arrangement.Failed, Window: r.Window, Seen: seen(42, "S1", half), Want: arrangement.Placement{Space: "S1", Frame: full}},
+	}
+	if err := s.Apply(arr, boot, t0, "look", failed); err != nil {
+		t.Fatal(err)
+	}
+	if got := one(t, s, arr); !got.Dirty || got.Progress != arrangement.Attempted {
+		t.Fatalf("after a failed put: %+v, want dirty with an attempt", got)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM event WHERE kind = 'failed'`); n != 1 {
+		t.Fatalf("failed events = %d, want 1", n)
+	}
+}
+
 func TestAdoptOfADirtyWindowCleansIt(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1", "S2")

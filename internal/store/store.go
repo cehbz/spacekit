@@ -274,6 +274,9 @@ func apply(tx *sql.Tx, change, arr int64, boot, at time.Time, d arrangement.Deci
 		}
 		return event(tx, change, win, "clean")
 	case arrangement.Failed:
+		if _, err := tx.Exec(`UPDATE owed SET progress = ? WHERE window_id = ? AND arrangement_id = ?`, int(arrangement.Attempted), win, arr); err != nil {
+			return err
+		}
 		return event(tx, change, win, "failed")
 	case arrangement.Put:
 		p, ok := d.Progress()

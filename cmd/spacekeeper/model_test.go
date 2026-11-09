@@ -726,3 +726,63 @@ func TestModelTickPutsWindowsMarkedByOwe(t *testing.T) {
 		t.Fatalf("put wanted %+v, want window 2", pw.Decisions)
 	}
 }
+
+// oneSpace is twoWindows after s2 was destroyed: D1 shows only s1, and
+// window 2 sits on s1 at frame f.
+func oneSpace(f layout.Rect) *snapshot {
+	p := twoWindows()
+	p.spaces = p.spaces[:1]
+	p.displays = []layout.CurrentDisplay{{UUID: "D1", Spaces: []layout.CurrentSpace{{ID: 100, UUID: "s1"}}}}
+	delete(p.idToKey, 200)
+	p.winSpace[2] = 100
+	p.windows[1].Frame = f
+	return p
+}
+
+// A put whose target space is gone can order nothing: it is a failed put,
+// the mark records the attempt so the tick stops deciding it, and a user
+// move of the window adopts it.
+func TestModelPutOntoAGoneSpaceIsAFailedPut(t *testing.T) {
+	st := tempStore(t)
+	b, out := startModelWith(t, st, displayGrace)
+	b.Publish(current(twoWindows())) // window 2's target is s2
+	decisionsOf(t, out, 2)
+	gone := oneSpace(layout.Rect{X: 10, Y: 10, W: 200, H: 200})
+	b.Publish(current(gone))
+	if _, err := st.OweAll(mustArr(t, st, displaySet(gone.spaces)), bootTime(), time.Now(), "owe", []uint32{2}); err != nil {
+		t.Fatal(err)
+	}
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	tc := expectEvent(t, out, TargetChanged{}, 2*time.Second).(TargetChanged)
+	if len(tc.Decisions) != 1 || tc.Decisions[0].Kind != arrangement.Failed || tc.Decisions[0].Seen.Binding != 2 || tc.Decisions[0].Want.Space != "s2" {
+		t.Fatalf("tick with window 2's space gone: %+v, want a failed put naming s2", tc.Decisions)
+	}
+	expectNone(t, out, 100*time.Millisecond) // in particular no PutWanted
+	b.Publish(Tick{Stamp: event.Now(), N: 2})
+	expectNone(t, out, 200*time.Millisecond) // the attempt is recorded: nothing left for the tick
+	b.Publish(current(oneSpace(layout.Rect{X: 400, Y: 10, W: 200, H: 200})))
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 2})
+	ds := decisionsOf(t, out, 1)
+	if len(ds) != 1 || ds[0].Kind != arrangement.Adopt || ds[0].Seen.Binding != 2 || ds[0].Seen.Frame.X != 400 {
+		t.Fatalf("user move after the failed put: %+v, want the target to follow window 2", ds)
+	}
+}
+
+// A tick inside a display run reads nothing from the store: the display set
+// seen mid-run is not recorded as an arrangement. Arrangement ids are
+// sequential, so a probe created after the tick is the next id after a probe
+// created before it only when the tick added no row.
+func TestModelTickDuringAHoldRecordsNoArrangement(t *testing.T) {
+	st := tempStore(t)
+	b, out := startModelWith(t, st, displayGrace)
+	b.Publish(current(twoWindows()))
+	decisionsOf(t, out, 2)
+	before := mustArr(t, st, "probe before")
+	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
+	b.Publish(current(dualPicture())) // mid-run: D2 has appeared
+	b.Publish(Tick{Stamp: event.Now(), N: 1})
+	expectNone(t, out, 200*time.Millisecond)
+	if after := mustArr(t, st, "probe after"); after != before+1 {
+		t.Fatalf("probe arrangements %d then %d: the held tick recorded an arrangement", before, after)
+	}
+}
