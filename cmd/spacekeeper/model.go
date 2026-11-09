@@ -13,37 +13,49 @@ import (
 	"github.com/cehbz/spacekit/internal/store"
 )
 
-// model judges Current against Target and is the only writer of Target. A
-// WindowQuiet judges that window; the Reconciled that follows a space or
-// display quiet judges every window, from the Current that reconciliation
-// just published. It holds while nothing seen is the user's (locked,
-// asleep, the overview, power-off announced), through a space or display
-// run and while a put runs; a judgement that falls inside a hold is taken
-// when the hold ends. A put's end judges the put's windows, since a put that
-// confirmed nothing produced no window events. After a display run every
-// window is owed its Target.
+// model decides Current against Target and is the only writer of Target. A
+// WindowQuiet decides that window; a DisplayQuiet decides every window
+// against the arrangement the displays now form; the first Current decides
+// at startup; a PutEnded decides the put's windows. It decides on the
+// event-kept Current, never on a read. It holds while nothing seen is the
+// user's (locked, asleep, power-off announced), through a display run and
+// while a put runs; a decide that falls inside a hold is taken when the hold
+// ends. A change has a system cause within the grace period after displays
+// settled, when the window reappeared and was bound this decide, or when the
+// window was in a put that ended within putGrace; any other change is the
+// user's.
 type model struct {
-	b       *bus.Bus
-	sub     *bus.Subscription
-	st      *store.Store
-	boot    func() time.Time // the boot time; tests substitute
-	pic     *snapshot
-	hold    struct{ locked, asleep, overview, poweringOff, space, display, putting bool }
-	pending string   // cause of a judgement deferred by a hold
-	putting []uint32 // the windows of the PutWanted in flight
-	// overviewEnded: the latest overview event was OverviewEnded, so the
-	// Reconciled for it ends the overview hold.
-	overviewEnded bool
-	oweNext       bool
-	started       bool
+	b              *bus.Bus
+	sub            *bus.Subscription
+	st             *store.Store
+	boot           func() time.Time // the boot time; tests substitute
+	pic            *snapshot
+	hold           struct{ locked, asleep, poweringOff, display, putting bool }
+	pending        pendingDecide
+	putting        []uint32 // the windows of the PutWanted in flight
+	displaySettled time.Time
+	grace          time.Duration   // after displays settle, window changes are the display change's
+	lastPut        map[uint32]bool // the windows of the put that ended last
+	putEnded       time.Time
+	putGrace       time.Duration // after a put ends, its windows' changes are the put's
+	started        bool
+}
+
+// pendingDecide is what holds deferred, per window so that each keeps its own
+// cause.
+type pendingDecide struct {
+	cause   string          // the last held cause; "" when nothing is pending
+	all     bool            // a full decide is pending
+	system  bool            // ... and it has a system cause
+	windows map[uint32]bool // narrowed decides pending: window → its change has a system cause
 }
 
 // newModel subscribes at once.
 func newModel(b *bus.Bus, st *store.Store) *model {
-	return &model{b: b, st: st, boot: bootTime,
-		sub: b.Subscribe("model", CurrentChanged{}, WindowQuiet{}, Reconciled{}, SpaceBurstBegan{}, DisplayBurstBegan{}, PutEnded{},
+	return &model{b: b, st: st, boot: bootTime, grace: displayGrace, putGrace: putGrace,
+		sub: b.Subscribe("model", CurrentChanged{}, WindowQuiet{}, DisplayQuiet{}, DisplayBurstBegan{}, PutEnded{},
 			event.SessionLocked{}, event.SessionUnlocked{}, event.ScreensSlept{}, event.ScreensWoke{},
-			event.SystemSleeping{}, event.SystemWoke{}, event.PoweringOff{}, event.OverviewShown{}, event.OverviewEnded{})}
+			event.SystemSleeping{}, event.SystemWoke{}, event.PoweringOff{})}
 }
 
 func (m *model) run(ctx context.Context) {
@@ -67,39 +79,37 @@ func (m *model) handle(e event.Event) {
 		m.pic = e.Current
 		if !m.started {
 			m.started = true
-			m.judge("startup", nil)
+			m.decide("startup", nil, false, nil)
 		}
 	case WindowQuiet:
-		m.judge("window quiet", []uint32{e.Window})
-	case Reconciled:
-		// The screen has just published the Current this judgement needs.
-		switch e.Cause {
-		case event.Name(SpaceQuiet{}):
-			m.hold.space = false
-			m.judge("space change", nil)
-		case event.Name(DisplayQuiet{}):
-			m.hold.display = false
-			m.oweNext = true
-			m.judge("display change", nil)
-		case event.Name(event.OverviewEnded{}):
-			if m.overviewEnded { // not reopened since: the screen's marker can say it still shows
-				m.hold.overview = false
-				m.release()
-			}
-		}
-	case SpaceBurstBegan:
-		m.hold.space = true
+		m.decide("window settled", []uint32{e.Window}, time.Since(m.displaySettled) < m.grace, nil)
+	case DisplayQuiet:
+		m.hold.display = false
+		m.displaySettled = time.Now()
+		m.decide("display settled", nil, true, nil)
 	case DisplayBurstBegan:
 		m.hold.display = true
-		log.Printf("display change began; judgements held")
+		log.Printf("display change began; decides held")
 	case PutEnded:
 		// Current already carries the put's results: the screen published
 		// each before the WindowChanged the putter read it from.
 		m.hold.putting = false
 		ids := m.putting
 		m.putting = nil
-		if len(ids) > 0 && m.pending == "" { // else the deferred full judgement covers them; nil would judge all
-			m.judge("put ended", ids)
+		m.putEnded = time.Now()
+		m.lastPut = make(map[uint32]bool, len(ids))
+		for _, id := range ids {
+			m.lastPut[id] = true
+		}
+		if m.pending.cause != "" { // the release decides them, as the put's whatever the grace
+			if m.pending.windows == nil {
+				m.pending.windows = make(map[uint32]bool, len(ids))
+			}
+			for _, id := range ids {
+				m.pending.windows[id] = true
+			}
+		} else if len(ids) > 0 { // nil would decide all
+			m.decide("put ended", ids, true, nil)
 		}
 		m.release()
 	case event.SessionLocked:
@@ -108,48 +118,65 @@ func (m *model) handle(e event.Event) {
 		m.hold.locked = false
 		m.release()
 	case event.ScreensSlept, event.SystemSleeping:
-		m.judge(event.Name(e), nil)
+		m.decide(event.Name(e), nil, false, nil)
 		m.hold.asleep = true
 	case event.ScreensWoke, event.SystemWoke:
 		m.hold.asleep = false
 		m.release()
 	case event.PoweringOff:
-		m.judge(event.Name(e), nil)
+		m.decide(event.Name(e), nil, false, nil)
 		m.hold.poweringOff = true
-		log.Printf("holding judgements until exit")
-	case event.OverviewShown:
-		m.hold.overview = true
-		m.overviewEnded = false
-	case event.OverviewEnded:
-		m.overviewEnded = true
-		// The hold ends on the Reconciled that follows: the screen refreshes
-		// Current when the overview closes, and the judgement wants that one.
+		log.Printf("holding decides until exit")
 	}
 }
 
 func (m *model) held() bool {
 	h := m.hold
-	return m.pic == nil || h.locked || h.asleep || h.overview || h.poweringOff || h.space || h.display || h.putting
+	return m.pic == nil || h.locked || h.asleep || h.poweringOff || h.display || h.putting
 }
 
-// release takes the judgement a hold deferred.
+// release takes the decides a hold deferred, each window with its own cause.
 func (m *model) release() {
-	if m.pending != "" && !m.held() {
-		cause := m.pending
-		m.pending = ""
-		m.judge(cause+" (held)", nil)
+	if m.pending.cause == "" || m.held() {
+		return
 	}
+	p := m.pending
+	m.pending = pendingDecide{}
+	if p.all {
+		m.decide(p.cause+" (held)", nil, p.system, p.windows)
+		return
+	}
+	ids := make([]uint32, 0, len(p.windows))
+	for id := range p.windows {
+		ids = append(ids, id)
+	}
+	m.decide(p.cause+" (held)", ids, false, p.windows)
 }
 
-// judge compares Current's windows (only these ids when given) with Target
-// and applies the outcome.
-func (m *model) judge(cause string, only []uint32) {
+// decide compares Current's windows (only these ids when given) with Target
+// and applies the outcome. system says the change behind this decide is the
+// system's (display change, put); also names windows whose change is the
+// system's; a window bound during it, or in a put that ended within
+// putGrace, is the system's in any case. A held decide is recorded per
+// window, and a system cause is not made the user's by a later held one.
+func (m *model) decide(cause string, only []uint32, system bool, also map[uint32]bool) {
 	if m.held() {
-		m.pending = cause
+		m.pending.cause = cause
+		if only == nil {
+			m.pending.all = true
+			m.pending.system = m.pending.system || system
+			return
+		}
+		if m.pending.windows == nil {
+			m.pending.windows = make(map[uint32]bool, len(only))
+		}
+		for _, id := range only {
+			m.pending.windows[id] = m.pending.windows[id] || system
+		}
 		return
 	}
 	if only == nil {
-		m.pending = "" // a full judgement covers any deferred cause
+		m.pending = pendingDecide{} // a full decide covers any deferred cause
 	}
 	all := seenWindows(m.pic)
 	seen := all
@@ -166,7 +193,7 @@ func (m *model) judge(cause string, only []uint32) {
 		}
 	}
 	boot, now := m.boot(), time.Now()
-	fail := func(err error) { log.Printf("judgement (%s) failed: %v", cause, err) }
+	fail := func(err error) { log.Printf("decide (%s) failed: %v", cause, err) }
 	arr, err := m.st.Arrangement(displaySet(m.pic.spaces))
 	if err != nil {
 		fail(err)
@@ -176,27 +203,26 @@ func (m *model) judge(cause string, only []uint32) {
 		fail(err)
 		return
 	}
-	if m.oweNext {
-		n, err := m.st.OweAll(arr, boot, now, cause, bindings(all))
-		if err != nil {
-			fail(err)
-			return
-		}
-		m.oweNext = false
-		log.Printf("%s: %d window(s) owed their placement", cause, n)
-	}
 	recorded, err := m.st.Recorded(arr, boot)
 	if err != nil {
 		fail(err)
 		return
 	}
 	// Binding weighs every unclaimed window, so a rival outside a narrowed
-	// judgement still makes the evidence ambiguous.
-	if recorded, err = m.rebind(arr, boot, now, cause, recorded, all); err != nil {
+	// decide still makes the evidence ambiguous.
+	recorded, bound, err := m.rebind(arr, boot, now, cause, recorded, all)
+	if err != nil {
 		fail(err)
 		return
 	}
-	ds := arrangement.Decide(recorded, arrangement.Look{Windows: seen})
+	putRecent := time.Since(m.putEnded) < m.putGrace
+	sys := make(map[uint32]bool, len(seen))
+	for _, s := range seen {
+		if system || bound[s.Binding] || also[s.Binding] || (putRecent && m.lastPut[s.Binding]) {
+			sys[s.Binding] = true
+		}
+	}
+	ds := arrangement.Decide(recorded, arrangement.Look{Windows: seen, System: sys})
 	saved, err := m.st.Spaces(arr)
 	if err != nil {
 		fail(err)
@@ -222,7 +248,7 @@ func (m *model) judge(cause string, only []uint32) {
 		return
 	}
 	if err := m.st.RefreshTitles(boot, seen); err != nil {
-		log.Printf("judgement (%s): titles: %v", cause, err)
+		log.Printf("decide (%s): titles: %v", cause, err)
 	}
 	if len(ds) > 0 {
 		m.b.Publish(TargetChanged{Stamp: event.Now(), Cause: cause, Decisions: ds})
@@ -239,9 +265,11 @@ func (m *model) judge(cause string, only []uint32) {
 }
 
 // rebind binds every seen window no record of this boot claims to the record
-// it recreates, if the evidence is unambiguous, and owes it its placement. A
-// record is a candidate once its id is absent from the whole window list.
-func (m *model) rebind(arr int64, boot, now time.Time, cause string, recorded []arrangement.Recorded, seen []arrangement.Seen) ([]arrangement.Recorded, error) {
+// it recreates, if the evidence is unambiguous. It returns the records and
+// the bindings it made; the caller treats those windows' changes as the
+// system's. A record is a candidate once its id is absent from the whole
+// window list.
+func (m *model) rebind(arr int64, boot, now time.Time, cause string, recorded []arrangement.Recorded, seen []arrangement.Seen) ([]arrangement.Recorded, map[uint32]bool, error) {
 	claimed := make(map[uint32]bool, len(recorded))
 	for _, r := range recorded {
 		claimed[r.Binding] = true
@@ -253,11 +281,11 @@ func (m *model) rebind(arr int64, boot, now time.Time, cause string, recorded []
 		}
 	}
 	if len(fresh) == 0 {
-		return recorded, nil
+		return recorded, nil, nil
 	}
 	stored, err := m.st.Stored(arr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	live := make(map[uint32]bool, len(m.pic.all))
 	for _, l := range m.pic.all {
@@ -265,7 +293,7 @@ func (m *model) rebind(arr int64, boot, now time.Time, cause string, recorded []
 	}
 	pairs := arrangement.Bind(fresh, stored, boot.Unix(), live)
 	if len(pairs) == 0 {
-		return recorded, nil
+		return recorded, nil, nil
 	}
 	var bs []store.Bound
 	var names []string
@@ -280,8 +308,13 @@ func (m *model) rebind(arr int64, boot, now time.Time, cause string, recorded []
 		}
 	}
 	if err := m.st.Bind(arr, boot, now, cause, bs); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	log.Printf("%s: bound %d of %d unclaimed window(s) to their records: %s", cause, len(bs), len(fresh), strings.Join(names, "; "))
-	return m.st.Recorded(arr, boot)
+	bound := make(map[uint32]bool, len(pairs))
+	for wid := range pairs {
+		bound[wid] = true
+	}
+	rs, err := m.st.Recorded(arr, boot)
+	return rs, bound, err
 }

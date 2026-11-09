@@ -19,6 +19,14 @@ import (
 const (
 	displayQuiet = 10 * time.Second
 	spaceQuiet   = 3 * time.Second
+	// displayGrace: window changes this soon after displays settle are the
+	// display change's; the window server and Chrome keep moving windows for
+	// up to 16 s after the last hotplug.
+	displayGrace = 20 * time.Second
+	// putGrace: a put's windows stay the put's this long after it ends; the
+	// settler's 500 ms debounce lands a put's last window settle after
+	// PutEnded, and a step waits up to stepTimeout for confirmation.
+	putGrace = 2 * time.Second
 	// windowQuiet debounces window-server window events: a drag reports a
 	// move per frame, with gaps inside a stroke under 300 ms.
 	windowQuiet = 500 * time.Millisecond

@@ -31,14 +31,23 @@ func twoWindows() *snapshot {
 	return p
 }
 
-func startModel(t *testing.T) (*bus.Bus, *bus.Subscription) {
+func startModelWith(t *testing.T, st *store.Store, grace time.Duration) (*bus.Bus, *bus.Subscription) {
+	return startModelGraces(t, st, grace, putGrace)
+}
+
+func startModelGraces(t *testing.T, st *store.Store, grace, pg time.Duration) (*bus.Bus, *bus.Subscription) {
 	b := bus.New()
 	out := b.Subscribe("t", TargetChanged{}, PutWanted{})
-	m := newModel(b, tempStore(t))
+	m := newModel(b, st)
+	m.grace, m.putGrace = grace, pg
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go m.run(ctx)
 	return b, out
+}
+
+func startModel(t *testing.T) (*bus.Bus, *bus.Subscription) {
+	return startModelWith(t, tempStore(t), displayGrace)
 }
 
 func current(p *snapshot) CurrentChanged { return CurrentChanged{Stamp: event.Now(), Current: p} }
@@ -87,33 +96,15 @@ func TestModelWindowQuietJudgesThatWindowOnly(t *testing.T) {
 	expectNone(t, out, 100*time.Millisecond)
 }
 
-func TestModelHoldDefersJudgement(t *testing.T) {
-	b, out := startModel(t)
-	b.Publish(current(twoWindows()))
-	decisionsOf(t, out, 2)
-	b.Publish(event.OverviewShown{Stamp: event.Now()})
-	moved := twoWindows()
-	moved.windows[0].Frame.X = 400
-	b.Publish(current(moved))
-	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1})
-	expectNone(t, out, 100*time.Millisecond)
-	b.Publish(event.OverviewEnded{Stamp: event.Now()})
-	expectNone(t, out, 100*time.Millisecond) // released only once the screen has reconciled
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "overview ended"})
-	if d := decisionsOf(t, out, 1)[0]; d.Seen.Binding != 1 || d.Seen.Frame.X != 400 {
-		t.Fatalf("deferred decision %+v", d)
-	}
-}
-
-func TestModelDisplayQuietOwesAndWantsPut(t *testing.T) {
+func TestModelDisplaySettledPutsAWindowOffTarget(t *testing.T) {
 	b, out := startModel(t)
 	b.Publish(current(twoWindows()))
 	decisionsOf(t, out, 2)
 	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
 	shrunk := twoWindows()
-	shrunk.windows[1].Frame = layout.Rect{X: 10, Y: 10, W: 100, H: 100} // hidden window 2 changed: not the user's
+	shrunk.windows[1].Frame = layout.Rect{X: 10, Y: 10, W: 100, H: 100}
 	b.Publish(current(shrunk))
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "display quiet"})
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
@@ -133,51 +124,263 @@ func TestModelDisplayQuietOwesAndWantsPut(t *testing.T) {
 	}
 }
 
-func TestModelHoldsWhilePuttingThenGivesUp(t *testing.T) {
-	b, out := startModel(t)
+func TestModelFailedPutLeavesTarget(t *testing.T) {
+	st := tempStore(t)
+	b, out := startModelWith(t, st, displayGrace)
 	b.Publish(current(twoWindows()))
 	decisionsOf(t, out, 2)
 	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
 	shrunk := twoWindows()
 	shrunk.windows[1].Frame = layout.Rect{X: 10, Y: 10, W: 100, H: 100}
 	b.Publish(current(shrunk))
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "display quiet"})
-	expectEvent(t, out, TargetChanged{}, 2*time.Second)
-	expectEvent(t, out, PutWanted{}, 2*time.Second)
-	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1})
-	expectNone(t, out, 100*time.Millisecond) // held while putting
-	b.Publish(PutEnded{Stamp: event.Now()})  // the put did not take: Current unchanged
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
+	decisionsOf(t, out, 2)                  // dirty, put
+	b.Publish(PutEnded{Stamp: event.Now()}) // the put did not take: Current unchanged
 	ds := decisionsOf(t, out, 1)
-	if ds[0].Kind != arrangement.Failed || ds[0].Seen.Binding != 2 {
-		t.Fatalf("after an unconfirmed put: %+v, want a failed put on window 2", ds[0])
+	if d := ds[0]; d.Kind != arrangement.Failed || d.Seen.Binding != 2 || d.Want.Frame != (layout.Rect{X: 10, Y: 10, W: 200, H: 200}) {
+		t.Fatalf("after an unconfirmed put: %+v, want a failed put naming the target", d)
+	}
+	arr, err := st.Arrangement(displaySet(shrunk.spaces))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, err := st.Recorded(arr, bootTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rs {
+		if r.Binding == 2 && (r.Frame != (layout.Rect{X: 10, Y: 10, W: 200, H: 200}) || !r.Dirty) {
+			t.Fatalf("window 2 record %+v; want the target unchanged and still dirty", r)
+		}
+	}
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 2}) // still off target inside the grace period: reported again, no second put
+	ds = decisionsOf(t, out, 1)
+	if d := ds[0]; d.Kind != arrangement.Failed || d.Move || d.Resize {
+		t.Fatalf("second settle of a failed window: %+v, want a failed put ordering nothing", d)
+	}
+	expectNone(t, out, 100*time.Millisecond) // in particular no PutWanted
+}
+
+func TestModelWindowSettledInsideDisplayGraceIsPut(t *testing.T) {
+	b, out := startModel(t)
+	b.Publish(current(twoWindows()))
+	decisionsOf(t, out, 2)
+	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
+	moved := twoWindows()
+	moved.windows[1].Frame.X = 400 // a late move by the window server or the app, hidden window 2
+	b.Publish(current(moved))
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 2})
+	ds := decisionsOf(t, out, 2)
+	if ds[0].Kind != arrangement.Dirty || ds[1].Kind != arrangement.Put || ds[1].Seen.Binding != 2 {
+		t.Fatalf("inside the grace period: %v, want dirty and put for window 2", kindsOf(ds))
 	}
 }
 
-// A put that confirmed nothing produced no window events: its PutEnded
-// judges the put's windows, and the owed window is given up.
-func TestModelPutEndedJudgesPutWindows(t *testing.T) {
-	b, out := startModel(t)
+func TestModelWindowSettledAfterDisplayGraceMovesTheTarget(t *testing.T) {
+	b, out := startModelWith(t, tempStore(t), 0)
+	b.Publish(current(twoWindows()))
+	decisionsOf(t, out, 2)
+	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
+	moved := twoWindows()
+	moved.windows[1].Frame.X = 400
+	b.Publish(current(moved))
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 2})
+	ds := decisionsOf(t, out, 1)
+	if ds[0].Kind != arrangement.Adopt || ds[0].Seen.Binding != 2 || ds[0].Seen.Frame.X != 400 {
+		t.Fatalf("after the grace period: %+v, want the target to follow window 2", ds[0])
+	}
+}
+
+func TestModelAgentRestartTreatsDifferencesAsTheUsers(t *testing.T) {
+	st := tempStore(t)
+	b1, out1 := startModelWith(t, st, displayGrace)
+	b1.Publish(current(twoWindows()))
+	decisionsOf(t, out1, 2)
+	b1.Close()
+	moved := twoWindows()
+	moved.windows[1].Frame.X = 400 // hidden window 2 moved while the agent was down
+	b2, out2 := startModelWith(t, st, displayGrace)
+	b2.Publish(current(moved))
+	ds := decisionsOf(t, out2, 1)
+	if ds[0].Kind != arrangement.Adopt || ds[0].Seen.Binding != 2 {
+		t.Fatalf("restart: %+v, want the target to follow window 2", ds[0])
+	}
+	expectNone(t, out2, 100*time.Millisecond)
+}
+
+// failedPutOfWindow2 runs a display change that shrinks hidden window 2 and
+// a put that does not take; it returns the shrunk picture. Window 2's target
+// is its original 200x200 frame.
+func failedPutOfWindow2(t *testing.T, b *bus.Bus, out *bus.Subscription) *snapshot {
+	t.Helper()
 	b.Publish(current(twoWindows()))
 	decisionsOf(t, out, 2)
 	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
 	shrunk := twoWindows()
 	shrunk.windows[1].Frame = layout.Rect{X: 10, Y: 10, W: 100, H: 100}
 	b.Publish(current(shrunk))
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "display quiet"})
-	expectEvent(t, out, TargetChanged{}, 2*time.Second)
-	expectEvent(t, out, PutWanted{}, 2*time.Second)
-	b.Publish(PutEnded{Stamp: event.Now()}) // nothing confirmed, nothing pending: Current unchanged
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
+	decisionsOf(t, out, 2) // dirty, put
+	return shrunk
+}
+
+// window2Target asserts window 2's stored target is its original frame and
+// it is still dirty.
+func window2Target(t *testing.T, st *store.Store, p *snapshot) {
+	t.Helper()
+	arr, err := st.Arrangement(displaySet(p.spaces))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, err := st.Recorded(arr, bootTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rs {
+		if r.Binding == 2 && (r.Frame != (layout.Rect{X: 10, Y: 10, W: 200, H: 200}) || !r.Dirty) {
+			t.Fatalf("window 2 record %+v; want the target unchanged and still dirty", r)
+		}
+	}
+}
+
+// A user settle held by a put does not make the put's own window the user's
+// when the hold releases.
+func TestModelHeldUserSettleDuringPutDoesNotAdoptTheFailedPut(t *testing.T) {
+	st := tempStore(t)
+	b, out := startModelWith(t, st, 0)
+	shrunk := failedPutOfWindow2(t, b, out)
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1}) // held by the put; window 1 unchanged
+	b.Publish(PutEnded{Stamp: event.Now()})               // the put did not take
 	ds := decisionsOf(t, out, 1)
-	if len(ds) != 1 || ds[0].Kind != arrangement.Failed || ds[0].Seen.Binding != 2 {
-		t.Fatalf("after a put that confirmed nothing: %+v, want a failed put on window 2 only", ds)
+	if d := ds[0]; len(ds) != 1 || d.Kind != arrangement.Failed || d.Seen.Binding != 2 || d.Want.Frame != (layout.Rect{X: 10, Y: 10, W: 200, H: 200}) {
+		t.Fatalf("release after the put: %+v, want only a failed put for window 2", ds)
 	}
 	expectNone(t, out, 100*time.Millisecond)
+	window2Target(t, st, shrunk)
+}
+
+// The settle that trails a put's own moves is the put's while putGrace runs;
+// with no put grace the same settle is the user's.
+func TestModelTrailingSettleAfterPutIsThePuts(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		pg   time.Duration
+		want arrangement.Kind
+	}{
+		{"inside put grace", putGrace, arrangement.Failed},
+		{"no put grace", 0, arrangement.Adopt},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b, out := startModelGraces(t, tempStore(t), 0, c.pg)
+			failedPutOfWindow2(t, b, out)
+			b.Publish(PutEnded{Stamp: event.Now()})
+			if d := decisionsOf(t, out, 1)[0]; d.Kind != arrangement.Failed {
+				t.Fatalf("put ended: %+v, want a failed put", d)
+			}
+			b.Publish(WindowQuiet{Stamp: event.Now(), Window: 2})
+			d := decisionsOf(t, out, 1)[0]
+			if d.Kind != c.want || d.Seen.Binding != 2 || d.Move || d.Resize {
+				t.Fatalf("trailing settle: %+v, want %v ordering nothing", d, c.want)
+			}
+			expectNone(t, out, 100*time.Millisecond) // in particular no PutWanted
+		})
+	}
+}
+
+// A lock that begins during a put and outlasts putGrace: the release decides
+// each pending window by its own cause, the put's window as the put's and the
+// user's settle as the user's.
+func TestModelLockDuringPutOutlastingPutGraceKeepsTheFailedPut(t *testing.T) {
+	st := tempStore(t)
+	b, out := startModelGraces(t, st, 0, 50*time.Millisecond)
+	shrunk := failedPutOfWindow2(t, b, out)
+	b.Publish(event.SessionLocked{Stamp: event.Now()})
+	moved := twoWindows()
+	moved.windows[1].Frame = shrunk.windows[1].Frame
+	moved.windows[0].Frame.X = 400
+	b.Publish(current(moved))
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1}) // held
+	b.Publish(PutEnded{Stamp: event.Now()})               // the put did not take
+	time.Sleep(150 * time.Millisecond)
+	b.Publish(event.SessionUnlocked{Stamp: event.Now()})
+	ds := decisionsOf(t, out, 2)
+	byWindow := map[uint32]arrangement.Decision{}
+	for _, d := range ds {
+		byWindow[d.Seen.Binding] = d
+	}
+	one, two := byWindow[1], byWindow[2]
+	if len(ds) != 2 || one.Kind != arrangement.Adopt || one.Seen.Frame.X != 400 ||
+		two.Kind != arrangement.Failed || two.Want.Frame != (layout.Rect{X: 10, Y: 10, W: 200, H: 200}) {
+		t.Fatalf("release after the lock: %+v, want adopt for window 1 and a failed put for window 2", ds)
+	}
+	expectNone(t, out, 100*time.Millisecond) // in particular no PutWanted
+	window2Target(t, st, shrunk)
+}
+
+// A put that ends inside a hold with nothing else pending decides only the
+// put's windows when the hold ends.
+func TestModelPutEndedHeldWithNothingPendingDecidesOnlyThePutsWindows(t *testing.T) {
+	b, out := startModelWith(t, tempStore(t), 0)
+	shrunk := failedPutOfWindow2(t, b, out)
+	b.Publish(event.SessionLocked{Stamp: event.Now()})
+	moved := twoWindows()
+	moved.windows[1].Frame = shrunk.windows[1].Frame
+	moved.windows[0].Frame.X = 400 // nothing settles window 1
+	b.Publish(current(moved))
+	b.Publish(PutEnded{Stamp: event.Now()}) // held; the put did not take
+	b.Publish(event.SessionUnlocked{Stamp: event.Now()})
+	ds := decisionsOf(t, out, 1)
+	if len(ds) != 1 || ds[0].Kind != arrangement.Failed || ds[0].Seen.Binding != 2 {
+		t.Fatalf("release after the lock: %+v, want only a failed put for window 2", ds)
+	}
+	expectNone(t, out, 100*time.Millisecond)
+}
+
+// A display change held by sleep stays the system's when a user settle is
+// held after it.
+func TestModelHeldSystemDecideSurvivesALaterHeldUserSettle(t *testing.T) {
+	b, out := startModelWith(t, tempStore(t), 0)
+	b.Publish(current(twoWindows()))
+	decisionsOf(t, out, 2)
+	b.Publish(event.ScreensSlept{Stamp: event.Now()})
+	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
+	shrunk := twoWindows()
+	shrunk.windows[1].Frame = layout.Rect{X: 10, Y: 10, W: 100, H: 100}
+	b.Publish(current(shrunk))
+	b.Publish(DisplayQuiet{Stamp: event.Now()}) // held by sleep
+	moved := twoWindows()
+	moved.windows[1].Frame = shrunk.windows[1].Frame
+	moved.windows[0].Frame.X = 400
+	b.Publish(current(moved))
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1}) // held by sleep
+	b.Publish(event.ScreensWoke{Stamp: event.Now()})
+	tc := expectEvent(t, out, TargetChanged{}, 2*time.Second).(TargetChanged)
+	var two []arrangement.Kind
+	for _, d := range tc.Decisions {
+		if d.Seen.Binding == 2 {
+			two = append(two, d.Kind)
+		}
+	}
+	if len(two) != 2 || two[0] != arrangement.Dirty || two[1] != arrangement.Put {
+		t.Fatalf("release after sleep: %+v, want dirty and put for window 2", tc.Decisions)
+	}
+}
+
+func kindsOf(ds []arrangement.Decision) []arrangement.Kind {
+	out := make([]arrangement.Kind, len(ds))
+	for i, d := range ds {
+		out[i] = d.Kind
+	}
+	return out
 }
 
 // A boot: the same windows under new ids, in a fresh "boot" the store has no
 // bindings for. Window 2 comes back as 12 with its title, at the wrong frame
 // and space; window 1 as 11 with its frame, on the wrong space; 13 is new.
-func TestModelBootBindsByEvidenceAndOwes(t *testing.T) {
+// A reappearance is a system cause: the bound windows are put back.
+func TestModelBootBindsByEvidenceAndPuts(t *testing.T) {
 	st := tempStore(t)
 	b := bus.New()
 	out := b.Subscribe("t", TargetChanged{}, PutWanted{})
@@ -202,7 +405,7 @@ func TestModelBootBindsByEvidenceAndOwes(t *testing.T) {
 	after.winSpace = map[uint32]uint64{11: 200, 12: 100, 13: 100} // 11 keeps its frame but is on the wrong space
 	after.all = []layout.ListedWindow{{ID: 11, OwnerName: "A"}, {ID: 12, OwnerName: "B"}, {ID: 13, OwnerName: "C"}}
 	b.Publish(current(after))
-	kinds := map[uint32]arrangement.Kind{}
+	kinds := map[uint32][]arrangement.Kind{}
 	var put *PutWanted
 	deadline := time.After(2 * time.Second)
 	for put == nil {
@@ -211,7 +414,7 @@ func TestModelBootBindsByEvidenceAndOwes(t *testing.T) {
 			switch e := e.(type) {
 			case TargetChanged:
 				for _, d := range e.Decisions {
-					kinds[d.Seen.Binding] = d.Kind
+					kinds[d.Seen.Binding] = append(kinds[d.Seen.Binding], d.Kind)
 				}
 			case PutWanted:
 				p := e
@@ -221,15 +424,20 @@ func TestModelBootBindsByEvidenceAndOwes(t *testing.T) {
 			t.Fatalf("no PutWanted; decisions %v", kinds)
 		}
 	}
-	if kinds[13] != arrangement.Adopt {
-		t.Fatalf("unknown window 13 %v, want adopt", kinds[13])
+	if ks := kinds[13]; len(ks) != 1 || ks[0] != arrangement.Adopt {
+		t.Fatalf("unknown window 13 %v, want adopt", ks)
 	}
-	owed := map[uint32]bool{}
+	for _, wid := range []uint32{11, 12} { // binding marks them dirty: the decide puts them
+		if ks := kinds[wid]; len(ks) != 1 || ks[0] != arrangement.Put {
+			t.Fatalf("bound window %d %v, want put", wid, ks)
+		}
+	}
+	wanted := map[uint32]bool{}
 	for _, d := range put.Decisions {
-		owed[d.Seen.Binding] = true
+		wanted[d.Seen.Binding] = true
 	}
-	if !owed[12] || !owed[11] || owed[13] {
-		t.Fatalf("put wanted for %v; want 11 (frame evidence) and 12 (title evidence)", owed)
+	if !wanted[12] || !wanted[11] || wanted[13] {
+		t.Fatalf("put wanted for %v; want 11 (frame evidence) and 12 (title evidence)", wanted)
 	}
 	for _, d := range put.Decisions {
 		switch d.Seen.Binding {
@@ -245,9 +453,10 @@ func TestModelBootBindsByEvidenceAndOwes(t *testing.T) {
 	}
 }
 
-// A display run holds judgements, and the owe-all after it owes back a shown
-// window the window server moved, which a plain judgement would adopt.
-func TestModelDisplayRunHoldsThenOwesShownWindow(t *testing.T) {
+// A display run holds decides, and the decide when displays settle puts back
+// a shown window the window server moved, which a decide with no system
+// cause would adopt.
+func TestModelDisplayRunHoldsThenPutsShownWindow(t *testing.T) {
 	b, out := startModel(t)
 	b.Publish(current(twoWindows()))
 	decisionsOf(t, out, 2)
@@ -257,14 +466,10 @@ func TestModelDisplayRunHoldsThenOwesShownWindow(t *testing.T) {
 	b.Publish(current(moved))
 	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1})
 	expectNone(t, out, 100*time.Millisecond) // held by the display run
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "display quiet"})
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
 	tc := expectEvent(t, out, TargetChanged{}, 2*time.Second).(TargetChanged)
-	kinds := map[uint32]arrangement.Kind{}
-	for _, d := range tc.Decisions {
-		kinds[d.Seen.Binding] = d.Kind
-	}
-	if kinds[1] != arrangement.Put {
-		t.Fatalf("window 1 %v after a display run, want repair", kinds[1])
+	if ks := kindsOf(tc.Decisions); len(ks) != 2 || ks[0] != arrangement.Dirty || ks[1] != arrangement.Put || tc.Decisions[1].Seen.Binding != 1 {
+		t.Fatalf("after a display run: %+v, want dirty and put for window 1", tc.Decisions)
 	}
 	pw := expectEvent(t, out, PutWanted{}, 2*time.Second).(PutWanted)
 	if len(pw.Decisions) != 1 || pw.Decisions[0].Seen.Binding != 1 {
@@ -272,7 +477,7 @@ func TestModelDisplayRunHoldsThenOwesShownWindow(t *testing.T) {
 	}
 }
 
-// A cause deferred before the first Current is not judged later.
+// A cause deferred before the first Current is not decided later.
 func TestModelStartupDropsEarlierCause(t *testing.T) {
 	b, out := startModel(t)
 	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1}) // no Current yet: held
@@ -281,7 +486,7 @@ func TestModelStartupDropsEarlierCause(t *testing.T) {
 	moved := twoWindows()
 	moved.windows[0].Frame.X = 400
 	b.Publish(current(moved))
-	b.Publish(PutEnded{Stamp: event.Now()}) // a release
+	b.Publish(PutEnded{Stamp: event.Now()}) // nothing was put: no decide, only a release
 	expectNone(t, out, 100*time.Millisecond)
 }
 
@@ -338,103 +543,22 @@ func TestModelWindowQuietBindsAgainstRivals(t *testing.T) {
 	}
 }
 
-// A full judgement covers a cause deferred before it: a later release does
-// not judge again.
-func TestModelFullJudgementTakesDeferredCause(t *testing.T) {
+// Settled displays with every window at its target decide nothing; the
+// display hold has ended, so a later settle is decided.
+func TestModelDisplaySettledWithEverythingInPlaceDecidesNothing(t *testing.T) {
 	b, out := startModel(t)
 	b.Publish(current(twoWindows()))
 	decisionsOf(t, out, 2)
 	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
-	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1}) // held by the display run
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "display quiet"})
-	expectEvent(t, out, TargetChanged{}, 2*time.Second) // owed and in place: released, nothing to put
-	moved := twoWindows()
-	moved.windows[0].Frame.X = 400
-	b.Publish(current(moved))
-	b.Publish(event.OverviewShown{Stamp: event.Now()})
-	b.Publish(event.OverviewEnded{Stamp: event.Now()})
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "overview ended"}) // an unrelated release
-	expectNone(t, out, 100*time.Millisecond)
-}
-
-// The display hold releases on the screen's Reconciled even when the
-// reconcile changed nothing and published no Current.
-func TestModelDisplayQuietWithoutCurrentReleases(t *testing.T) {
-	b, out := startModel(t)
-	b.Publish(current(twoWindows()))
-	decisionsOf(t, out, 2)
-	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "display quiet"})
-	for _, d := range decisionsOf(t, out, 2) {
-		if d.Kind != arrangement.Clean {
-			t.Fatalf("decision %+v, want release: owed by the display run and in place", d)
-		}
-	}
-}
-
-// An overview the screen's marker reopens keeps the hold through the
-// Reconciled for the stale end; the real end releases it.
-func TestModelOverviewReopenedKeepsHold(t *testing.T) {
-	b, out := startModel(t)
-	b.Publish(current(twoWindows()))
-	decisionsOf(t, out, 2)
-	b.Publish(event.OverviewShown{Stamp: event.Now()})
-	b.Publish(event.OverviewEnded{Stamp: event.Now()})
-	b.Publish(event.OverviewShown{Stamp: event.Now()}) // the marker is still listed
-	moved := twoWindows()
-	moved.windows[0].Frame.X = 400
-	b.Publish(current(moved))
-	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1}) // deferred
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "overview ended"})
-	expectNone(t, out, 100*time.Millisecond)
-	b.Publish(event.OverviewEnded{Stamp: event.Now()})
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "overview ended"})
-	if d := decisionsOf(t, out, 1)[0]; d.Seen.Binding != 1 || d.Seen.Frame.X != 400 {
-		t.Fatalf("deferred decision %+v", d)
-	}
-}
-
-// A space run holds judgements; the space change's full judgement covers the
-// cause it deferred.
-func TestModelSpaceRunHolds(t *testing.T) {
-	b, out := startModel(t)
-	b.Publish(current(twoWindows()))
-	decisionsOf(t, out, 2)
-	b.Publish(SpaceBurstBegan{Stamp: event.Now()})
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
+	expectNone(t, out, 200*time.Millisecond)
 	moved := twoWindows()
 	moved.windows[0].Frame.X = 400
 	b.Publish(current(moved))
 	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1})
-	expectNone(t, out, 100*time.Millisecond) // held by the space run
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "space quiet"})
-	tc := expectEvent(t, out, TargetChanged{}, 2*time.Second).(TargetChanged)
-	if tc.Cause != "space change" || len(tc.Decisions) != 1 || tc.Decisions[0].Seen.Binding != 1 || tc.Decisions[0].Seen.Frame.X != 400 {
-		t.Fatalf("%q: %+v, want the space change judging window 1", tc.Cause, tc.Decisions)
+	if ds := decisionsOf(t, out, 1); ds[0].Seen.Binding != 1 {
+		t.Fatalf("after displays settled: %+v, want window 1 decided", ds[0])
 	}
-	expectNone(t, out, 100*time.Millisecond)
-}
-
-// A space picked from inside the overview ends the overview inside a space
-// run: the overview's release waits for the space quiet.
-func TestModelOverviewEndInsideSpaceRunWaits(t *testing.T) {
-	b, out := startModel(t)
-	b.Publish(current(twoWindows()))
-	decisionsOf(t, out, 2)
-	b.Publish(event.OverviewShown{Stamp: event.Now()})
-	moved := twoWindows()
-	moved.windows[0].Frame.X = 400
-	b.Publish(current(moved))
-	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1}) // deferred by the overview
-	b.Publish(SpaceBurstBegan{Stamp: event.Now()})
-	b.Publish(event.OverviewEnded{Stamp: event.Now()})
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "overview ended"})
-	expectNone(t, out, 100*time.Millisecond) // the space run still holds
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: "space quiet"})
-	tc := expectEvent(t, out, TargetChanged{}, 2*time.Second).(TargetChanged)
-	if tc.Cause != "space change" || len(tc.Decisions) != 1 || tc.Decisions[0].Seen.Binding != 1 {
-		t.Fatalf("%q: %+v, want the space change judging window 1", tc.Cause, tc.Decisions)
-	}
-	expectNone(t, out, 100*time.Millisecond)
 }
 
 // dualPicture is testPicture with a second display D2 showing space s9, and
@@ -473,8 +597,8 @@ func mustArr(t *testing.T, st *store.Store, set string) int64 {
 // Boot 1 with two displays adopts Chrome on D2. Boot 2 on the laptop alone
 // restores Chrome under a new id at the laptop's default frame: it binds to
 // its record (the same window row) and takes a laptop placement. D2
-// returning then repairs it to the recorded dual frame.
-func TestModelLaptopBootBindsDualOnlyRecordAndDualReturnRepairsIt(t *testing.T) {
+// returning then puts it back at the recorded dual frame.
+func TestModelLaptopBootBindsDualOnlyRecordAndDualReturnPutsItBack(t *testing.T) {
 	st := tempStore(t)
 	b := bus.New()
 	out := b.Subscribe("t", TargetChanged{}, PutWanted{})
@@ -539,7 +663,7 @@ func TestModelLaptopBootBindsDualOnlyRecordAndDualReturnRepairsIt(t *testing.T) 
 	dual.all = []layout.ListedWindow{{ID: 1, OwnerName: "A", Title: "one"}, {ID: 22, OwnerName: "Google Chrome", Title: "autobrr"}}
 	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
 	b.Publish(current(dual))
-	b.Publish(Reconciled{Stamp: event.Now(), Cause: event.Name(DisplayQuiet{})})
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
 	deadline := time.After(2 * time.Second)
 	for {
 		select {
@@ -550,7 +674,7 @@ func TestModelLaptopBootBindsDualOnlyRecordAndDualReturnRepairsIt(t *testing.T) 
 						return
 					}
 				}
-				t.Fatalf("PutWanted %+v; want Chrome repaired to its dual frame", p.Decisions)
+				t.Fatalf("PutWanted %+v; want Chrome put back at its dual frame", p.Decisions)
 			}
 		case <-deadline:
 			t.Fatal("no PutWanted after D2 returned")
