@@ -28,7 +28,7 @@ func (f *fakeOrders) setFrame(pid int, wid uint32, fr layout.Rect) error {
 func hiddenPut() PutWanted {
 	p := twoWindows()
 	p.windows[1].Frame = layout.Rect{X: 10, Y: 10, W: 100, H: 100}
-	d := arrangement.Decision{Kind: arrangement.Repair, Window: 2,
+	d := arrangement.Decision{Kind: arrangement.Put, Window: 2,
 		Seen: arrangement.Seen{Binding: 2, PID: 11, App: "B", Placement: arrangement.Placement{Space: "s2", Frame: p.windows[1].Frame}},
 		Want: arrangement.Placement{Space: "s2", Frame: layout.Rect{X: 10, Y: 10, W: 200, H: 200}}, Resize: true}
 	return PutWanted{Stamp: event.Now(), Arr: 1, Current: p, Spaces: p.spaces, Decisions: []arrangement.Decision{d}}

@@ -23,15 +23,14 @@ import (
 // confirmed nothing produced no window events. After a display run every
 // window is owed its Target.
 type model struct {
-	b           *bus.Bus
-	sub         *bus.Subscription
-	st          *store.Store
-	boot        func() time.Time // the boot time; tests substitute
-	pic         *snapshot
-	prevVisible map[string]bool
-	hold        struct{ locked, asleep, overview, poweringOff, space, display, putting bool }
-	pending     string   // cause of a judgement deferred by a hold
-	putting     []uint32 // the windows of the PutWanted in flight
+	b       *bus.Bus
+	sub     *bus.Subscription
+	st      *store.Store
+	boot    func() time.Time // the boot time; tests substitute
+	pic     *snapshot
+	hold    struct{ locked, asleep, overview, poweringOff, space, display, putting bool }
+	pending string   // cause of a judgement deferred by a hold
+	putting []uint32 // the windows of the PutWanted in flight
 	// overviewEnded: the latest overview event was OverviewEnded, so the
 	// Reconciled for it ends the overview hold.
 	overviewEnded bool
@@ -197,15 +196,7 @@ func (m *model) judge(cause string, only []uint32) {
 		fail(err)
 		return
 	}
-	visible := visibleKeys(m.pic)
-	both := make(map[string]bool, len(visible)+len(m.prevVisible))
-	for k := range visible {
-		both[k] = true
-	}
-	for k := range m.prevVisible {
-		both[k] = true
-	}
-	ds := arrangement.Decide(recorded, arrangement.Look{Windows: seen, Visible: both})
+	ds := arrangement.Decide(recorded, arrangement.Look{Windows: seen})
 	saved, err := m.st.Spaces(arr)
 	if err != nil {
 		fail(err)
@@ -215,7 +206,7 @@ func (m *model) judge(cause string, only []uint32) {
 	var puts []arrangement.Decision
 	for i := range ds {
 		d := &ds[i]
-		if d.Kind != arrangement.Repair {
+		if d.Kind != arrangement.Put {
 			continue
 		}
 		if _, ok := resolved[d.Want.Space]; !ok {
@@ -233,7 +224,6 @@ func (m *model) judge(cause string, only []uint32) {
 	if err := m.st.RefreshTitles(boot, seen); err != nil {
 		log.Printf("judgement (%s): titles: %v", cause, err)
 	}
-	m.prevVisible = visible
 	if len(ds) > 0 {
 		m.b.Publish(TargetChanged{Stamp: event.Now(), Cause: cause, Decisions: ds})
 	}

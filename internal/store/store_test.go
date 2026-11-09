@@ -114,7 +114,7 @@ func TestAdoptCreatesWindowBindingAndPlacement(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
-	if r.Window == 0 || !r.Placed || r.Space != "S1" || r.Frame != full || r.Owed {
+	if r.Window == 0 || !r.Placed || r.Space != "S1" || r.Frame != full || r.Dirty {
 		t.Fatalf("recorded = %+v", r)
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM window`); n != 1 {
@@ -171,35 +171,35 @@ func one(t *testing.T, s *Store, arr int64) arrangement.Recorded {
 	return rs[0]
 }
 
-func TestOweThenRelease(t *testing.T) {
+func TestDirtyThenClean(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := one(t, s, arr); !got.Owed || got.Progress != arrangement.Untried || got.Frame != full {
-		t.Fatalf("owed keeps its placement: %+v", got)
+	if got := one(t, s, arr); !got.Dirty || got.Progress != arrangement.Untried || got.Frame != full {
+		t.Fatalf("dirty keeps its placement: %+v", got)
 	}
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Release, Window: r.Window, Seen: seen(42, "S1", full)}}); err != nil {
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Clean, Window: r.Window, Seen: seen(42, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
-	if got := one(t, s, arr); got.Owed {
-		t.Fatalf("released: %+v", got)
+	if got := one(t, s, arr); got.Dirty {
+		t.Fatalf("clean: %+v", got)
 	}
-	if n := count(t, s, `SELECT COUNT(*) FROM event WHERE kind IN ('owed', 'released')`); n != 2 {
+	if n := count(t, s, `SELECT COUNT(*) FROM event WHERE kind IN ('dirty', 'clean')`); n != 2 {
 		t.Fatalf("journal events = %d, want 2", n)
 	}
 }
 
-func TestRepairRecordsProgress(t *testing.T) {
+func TestPutRecordsProgress(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	want := arrangement.Placement{Space: "S1", Frame: full}
 	ds := []arrangement.Decision{
-		{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S2", half)},
-		{Kind: arrangement.Repair, Window: r.Window, Seen: seen(42, "S2", half), Want: want, Move: true, Resize: true},
+		{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S2", half)},
+		{Kind: arrangement.Put, Window: r.Window, Seen: seen(42, "S2", half), Want: want, Move: true, Resize: true},
 	}
 	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
 		t.Fatal(err)
@@ -209,37 +209,60 @@ func TestRepairRecordsProgress(t *testing.T) {
 	}
 }
 
-func TestIdleRepairWritesNothing(t *testing.T) {
+func TestIdlePutWritesNothing(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	before := count(t, s, `SELECT COUNT(*) FROM change`)
-	idle := arrangement.Decision{Kind: arrangement.Repair, Window: r.Window, Seen: seen(42, "S1", half), Want: arrangement.Placement{Space: "S1", Frame: full}}
+	idle := arrangement.Decision{Kind: arrangement.Put, Window: r.Window, Seen: seen(42, "S1", half), Want: arrangement.Placement{Space: "S1", Frame: full}}
 	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{idle}); err != nil {
 		t.Fatal(err)
 	}
 	if after := count(t, s, `SELECT COUNT(*) FROM change`); after != before {
-		t.Fatalf("a repair that did nothing must not write a change: %d -> %d", before, after)
+		t.Fatalf("a put that did nothing must not write a change: %d -> %d", before, after)
 	}
 }
 
-func TestGiveUpAdoptsAndClearsOwed(t *testing.T) {
+func TestFailedKeepsTheTarget(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
-	ds := []arrangement.Decision{{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S1", half)}}
+	ds := []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)}}
 	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.GiveUp, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
+	failed := arrangement.Decision{Kind: arrangement.Failed, Window: r.Window, Seen: seen(42, "S1", half),
+		Want: arrangement.Placement{Space: "S1", Frame: full}}
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{failed}); err != nil {
 		t.Fatal(err)
 	}
 	got := one(t, s, arr)
-	if got.Owed || got.Frame != half {
-		t.Fatalf("given up: adopted where it is and no longer owed: %+v", got)
+	if !got.Dirty || got.Space != "S1" || got.Frame != full {
+		t.Fatalf("a failed put leaves the target and the dirty mark: %+v", got)
 	}
-	if n := count(t, s, `SELECT COUNT(*) FROM event WHERE kind = 'gave up'`); n != 1 {
-		t.Fatalf("gave-up events = %d", n)
+	if n := count(t, s, `SELECT COUNT(*) FROM event WHERE kind = 'failed'`); n != 1 {
+		t.Fatalf("failed events = %d", n)
+	}
+}
+
+func TestAdoptOfADirtyWindowCleansIt(t *testing.T) {
+	s := open(t)
+	arr := arrangementWith(t, s, "D1", "S1", "S2")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	ds := []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)}}
+	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
+		t.Fatal(err)
+	}
+	ds = []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}
+	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
+		t.Fatal(err)
+	}
+	got := one(t, s, arr)
+	if got.Dirty {
+		t.Fatalf("Dirty = true after an adopt: %+v", got)
+	}
+	if got.Space != "S2" || got.Frame != half {
+		t.Fatalf("the target follows the window: %+v", got)
 	}
 }
 
@@ -249,8 +272,8 @@ func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
 	a := adoptNew(t, s, arr, 1, "S1", full)
 	adoptNew(t, s, arr, 2, "S1", full)
 	moved := []arrangement.Decision{
-		{Kind: arrangement.Owe, Window: a.Window, Seen: seen(1, "S2", half)},
-		{Kind: arrangement.Repair, Window: a.Window, Seen: seen(1, "S2", half), Want: arrangement.Placement{Space: "S1", Frame: full}, Move: true},
+		{Kind: arrangement.Dirty, Window: a.Window, Seen: seen(1, "S2", half)},
+		{Kind: arrangement.Put, Window: a.Window, Seen: seen(1, "S2", half), Want: arrangement.Placement{Space: "S1", Frame: full}, Move: true},
 	}
 	if err := s.Apply(arr, boot, t0, "look", moved); err != nil {
 		t.Fatal(err)
@@ -261,7 +284,7 @@ func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
 	}
 	rs, _ := s.Recorded(arr, boot)
 	for _, r := range rs {
-		if !r.Owed || r.Progress != arrangement.Untried {
+		if !r.Dirty || r.Progress != arrangement.Untried {
 			t.Fatalf("every placed window owed afresh: %+v", r)
 		}
 	}
@@ -408,7 +431,7 @@ func TestBindGivesAStoredWindowAFreshIdAndOwesIt(t *testing.T) {
 			got = &rs[i]
 		}
 	}
-	if got == nil || got.Window != st[0].Window || !got.Owed || got.Space != "S2" {
+	if got == nil || got.Window != st[0].Window || !got.Dirty || got.Space != "S2" {
 		t.Fatalf("the fresh id is the same window, owed its recorded placement: %+v", rs)
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM window`); n != 1 {
@@ -430,7 +453,7 @@ func TestJournalShowsWhatEachChangeDid(t *testing.T) {
 	if err := s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Apply(arr, boot, t0.Add(2*time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Owe, Window: r.Window, Seen: seen(42, "S2", full)}}); err != nil {
+	if err := s.Apply(arr, boot, t0.Add(2*time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S2", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	j, err := s.Journal(10)
@@ -452,8 +475,8 @@ func TestJournalShowsWhatEachChangeDid(t *testing.T) {
 		t.Fatalf("entry = %+v", j[1])
 	}
 	third := j[2].Events[0]
-	if third.Kind != "owed" || third.From != nil || third.To != nil {
-		t.Fatalf("owing changes no placement: %+v", third)
+	if third.Kind != "dirty" || third.From != nil || third.To != nil {
+		t.Fatalf("a dirty mark changes no placement: %+v", third)
 	}
 	if last, _ := s.Journal(1); len(last) != 1 || last[0].ID != j[2].ID {
 		t.Fatalf("Journal(1) = %+v", last)
@@ -473,7 +496,7 @@ func TestUndoRestoresThePriorPlacementAndOwesTheWindow(t *testing.T) {
 		t.Fatalf("Undo = %d, %d, %v", reverted, skipped, err)
 	}
 	got := one(t, s, arr)
-	if got.Space != "S1" || got.Frame != full || !got.Owed || got.Progress != arrangement.Untried {
+	if got.Space != "S1" || got.Frame != full || !got.Dirty || got.Progress != arrangement.Untried {
 		t.Fatalf("back at the prior placement and owed: %+v", got)
 	}
 	j, _ := s.Journal(1)
@@ -494,7 +517,7 @@ func TestUndoLeavesWindowsThatChangedAgain(t *testing.T) {
 	if err != nil || reverted != 0 || skipped != 1 {
 		t.Fatalf("Undo = %d, %d, %v", reverted, skipped, err)
 	}
-	if got := one(t, s, arr); got.Space != "S3" || got.Owed {
+	if got := one(t, s, arr); got.Space != "S3" || got.Dirty {
 		t.Fatalf("a later placement stands: %+v", got)
 	}
 	if after := count(t, s, `SELECT COUNT(*) FROM change`); after != before {
@@ -576,7 +599,7 @@ func TestOweAllOwesOnlyWindowsOnScreenEachOnce(t *testing.T) {
 	if err := s.Bind(arr, boot, t0, "relaunch", []Bound{{Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Release, Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {
+	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Clean, Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	n, err := s.OweAll(arr, boot, t0, "display change", []uint32{9})
@@ -673,7 +696,7 @@ func TestBindToAWindowUnplacedHereOwesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	rs, _ := s.Recorded(air, boot2)
-	if len(rs) != 1 || rs[0].Window != st[0].Window || rs[0].Placed || rs[0].Owed {
+	if len(rs) != 1 || rs[0].Window != st[0].Window || rs[0].Placed || rs[0].Dirty {
 		t.Fatalf("Recorded(air) = %+v; want the same window, unplaced, not owed", rs)
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM owed`); n != 0 {

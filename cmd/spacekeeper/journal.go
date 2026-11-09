@@ -74,7 +74,7 @@ func summary(e store.Entry) string {
 		counts[ev.Kind]++
 	}
 	var parts []string
-	for _, k := range []string{"adopted", "bound", "owed", "repaired", "released", "gave up", "undone"} {
+	for _, k := range []string{"adopted", "bound", "dirty", "put", "clean", "failed", "undone", "owed", "repaired", "released", "gave up"} {
 		if counts[k] > 0 {
 			parts = append(parts, k+" "+strconv.Itoa(counts[k]))
 		}

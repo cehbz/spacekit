@@ -60,17 +60,6 @@ func displaySet(spaces []layout.SavedSpace) string {
 	return strings.Join(ids, ",")
 }
 
-// visibleKeys are the keys of the spaces each display is showing.
-func visibleKeys(s *snapshot) map[string]bool {
-	out := make(map[string]bool, len(s.current))
-	for id := range s.current {
-		if key, ok := s.idToKey[id]; ok {
-			out[key] = true
-		}
-	}
-	return out
-}
-
 // seenWindows are the gathered windows on user desktops; fullscreen
 // windows are not placed.
 func seenWindows(s *snapshot) []arrangement.Seen {
@@ -87,10 +76,10 @@ func seenWindows(s *snapshot) []arrangement.Seen {
 	return out
 }
 
-// logDecisions writes one line per judgement that did something, and one line
-// per window given up on.
-func logDecisions(trigger string, ds []arrangement.Decision) {
-	var adopted, owed, released, repaired, gaveUp int
+// logDecisions writes one line per decide that did something, and one line
+// per failed put.
+func logDecisions(cause string, ds []arrangement.Decision) {
+	var adopted, dirty, put, clean, failed int
 	name := func(s arrangement.Seen) string {
 		t := s.Title
 		if len(t) > 24 {
@@ -110,26 +99,27 @@ func logDecisions(trigger string, ds []arrangement.Decision) {
 		switch d.Kind {
 		case arrangement.Adopt:
 			adopted++
-		case arrangement.Owe:
-			owed++
+		case arrangement.Dirty:
+			dirty++
 			touch(d.Seen)
-		case arrangement.Release:
-			released++
-		case arrangement.Repair:
+		case arrangement.Clean:
+			clean++
+		case arrangement.Put:
 			if _, ok := d.Progress(); ok {
-				repaired++
+				put++
 				touch(d.Seen)
 			}
-		case arrangement.GiveUp:
-			gaveUp++
-			f := d.Seen.Frame
-			log.Printf("released unrepaired: %s at %.0f,%.0f %.0fx%.0f on %.8s", name(d.Seen), f.X, f.Y, f.W, f.H, d.Seen.Space)
+		case arrangement.Failed:
+			failed++
+			f, w := d.Seen.Frame, d.Want.Frame
+			log.Printf("put failed: %s at %.0f,%.0f %.0fx%.0f on %.8s; target %.0f,%.0f %.0fx%.0f on %.8s",
+				name(d.Seen), f.X, f.Y, f.W, f.H, d.Seen.Space, w.X, w.Y, w.W, w.H, d.Want.Space)
 		}
 	}
-	if adopted+owed+released+repaired+gaveUp == 0 {
+	if adopted+dirty+put+clean+failed == 0 {
 		return
 	}
-	line := fmt.Sprintf("judgement (%s): adopted %d, owed %d, repaired %d, released %d, gave up %d", trigger, adopted, owed, repaired, released, gaveUp)
+	line := fmt.Sprintf("decide (%s): adopted %d, dirty %d, put %d, clean %d, failed %d", cause, adopted, dirty, put, clean, failed)
 	if len(touched) > 0 {
 		line += ": " + strings.Join(touched, "; ")
 	}

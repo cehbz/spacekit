@@ -10,7 +10,7 @@ import (
 )
 
 // Tolerance is the hysteresis band, in points per edge, inside which a frame
-// counts as in place: a difference inside it is neither adopted nor repaired.
+// counts as in place: a difference inside it is neither adopted nor put back.
 const Tolerance = 3.0
 
 // Placement is where a window belongs: a space and a frame. Space is a space
@@ -32,8 +32,8 @@ func SameFrame(a, b layout.Rect) bool {
 	return near(a.X, b.X) && near(a.Y, b.Y) && near(a.X+a.W, b.X+b.W) && near(a.Y+a.H, b.Y+b.H)
 }
 
-// Progress records whether a repair of an owed window has been attempted,
-// for the next look to judge.
+// Progress records whether a put of a dirty window has been attempted, for
+// the next decide.
 type Progress int
 
 const (
@@ -47,7 +47,7 @@ type Recorded struct {
 	Binding uint32 // window-server id in this boot
 	Placed  bool   // has a placement in the current arrangement
 	Placement
-	Owed     bool
+	Dirty    bool
 	Progress Progress
 }
 
@@ -59,22 +59,22 @@ type Seen struct {
 	Placement
 }
 
-// Look is one observation of the live session, taken when no disturbance is
-// in progress. Visible holds the keys of the spaces shown at this look or the
-// previous one: the only spaces whose windows the user can have touched.
+// Look is one decide's input: the windows in Current to judge, and which of
+// them changed for a system cause (a display change, a reappearance after a
+// reboot or relaunch, a put). A window not in System changed for the user.
 type Look struct {
 	Windows []Seen
-	Visible map[string]bool
+	System  map[uint32]bool
 }
 
 type Kind int
 
 const (
-	Adopt   Kind = iota // the arrangement follows the screen
-	Owe                 // a change nobody can have made by hand: put it back
-	Release             // an owed window is back in place
-	GiveUp              // a repair was attempted and did not take: adopt where it is
-	Repair              // an owed window is out of place: act where possible
+	Adopt  Kind = iota // the target follows the window (no system cause, or no target yet)
+	Dirty              // a system cause moved it: the window is to be put back
+	Clean              // a dirty window is at its target
+	Put                // a dirty window is off target: act where possible
+	Failed             // a put did not take; the target stays, nothing more is tried until the next cause
 )
 
 // Decision is what a look means for one window.
@@ -82,16 +82,18 @@ type Decision struct {
 	Kind         Kind
 	Window       int64 // 0: a window never seen before
 	Seen         Seen
-	Want         Placement // Repair: where it belongs
-	Move, Resize bool      // Repair: what to do at this look
+	Want         Placement // Put, Failed: the target
+	Move, Resize bool      // Put: what to do at this decide
 }
 
 // Decide compares each seen window with its record. A window with no record
-// or no placement is adopted where it is. A settled window that differs from
-// its placement is adopted when its old or new space was visible, and owed
-// otherwise. An owed window is released once seen in place, repaired at once,
-// and given up on when an attempt did not take. Recorded windows the look did
-// not see are left alone.
+// or no target is adopted where it is. A window at its target is clean (a
+// decision only when it was dirty). A window off target changed for a system
+// cause (in look.System) is dirty and put, unless a put was already tried,
+// which is a failed put: the target stays and nothing more is ordered until
+// the next cause. A window off target with no system cause moved for the
+// user: the target follows it. Recorded windows the look did not see are left
+// alone.
 func Decide(recorded []Recorded, look Look) []Decision {
 	byBinding := make(map[uint32]Recorded, len(recorded))
 	for _, r := range recorded {
@@ -105,36 +107,35 @@ func Decide(recorded []Recorded, look Look) []Decision {
 			out = append(out, Decision{Kind: Adopt, Seen: s})
 		case !r.Placed:
 			out = append(out, Decision{Kind: Adopt, Window: r.Window, Seen: s})
-		case r.Owed:
-			out = append(out, owed(r, s))
 		case r.Placement.InPlace(s.Placement):
-		case look.Visible[r.Space] || look.Visible[s.Space]:
+			if r.Dirty {
+				out = append(out, Decision{Kind: Clean, Window: r.Window, Seen: s})
+			}
+		case !look.System[s.Binding]:
 			out = append(out, Decision{Kind: Adopt, Window: r.Window, Seen: s})
+		case r.Dirty && r.Progress == Attempted:
+			out = append(out, Decision{Kind: Failed, Window: r.Window, Seen: s, Want: r.Placement})
+		case r.Dirty:
+			out = append(out, put(r, s))
 		default:
-			out = append(out, Decision{Kind: Owe, Window: r.Window, Seen: s}, owed(r, s))
+			out = append(out, Decision{Kind: Dirty, Window: r.Window, Seen: s}, put(r, s))
 		}
 	}
 	return out
 }
 
-func owed(r Recorded, s Seen) Decision {
-	if r.Placement.InPlace(s.Placement) {
-		return Decision{Kind: Release, Window: r.Window, Seen: s}
-	}
-	if r.Progress == Attempted {
-		return Decision{Kind: GiveUp, Window: r.Window, Seen: s}
-	}
+func put(r Recorded, s Seen) Decision {
 	return Decision{
-		Kind: Repair, Window: r.Window, Seen: s, Want: r.Placement,
+		Kind: Put, Window: r.Window, Seen: s, Want: r.Placement,
 		Move:   s.Space != r.Space,
 		Resize: !SameFrame(r.Frame, s.Frame),
 	}
 }
 
-// Progress is what a repair leaves for the next look: Attempted once the
+// Progress is what a put leaves for the next decide: Attempted once the
 // window was moved or resized. ok is false when nothing was done.
 func (d Decision) Progress() (p Progress, ok bool) {
-	if d.Kind == Repair && (d.Move || d.Resize) {
+	if d.Kind == Put && (d.Move || d.Resize) {
 		return Attempted, true
 	}
 	return Untried, false

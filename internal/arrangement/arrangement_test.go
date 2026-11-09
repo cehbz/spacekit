@@ -41,14 +41,6 @@ func saw(binding uint32, space string, f layout.Rect) Seen {
 	return Seen{Binding: binding, PID: 1, App: "A", Placement: Placement{space, f}}
 }
 
-func vis(keys ...string) map[string]bool {
-	m := map[string]bool{}
-	for _, k := range keys {
-		m[k] = true
-	}
-	return m
-}
-
 func kinds(ds []Decision) []Kind {
 	var ks []Kind
 	for _, d := range ds {
@@ -71,7 +63,7 @@ func wantKinds(t *testing.T, ds []Decision, want ...Kind) {
 }
 
 func TestDecideFirstSightingAdopts(t *testing.T) {
-	ds := Decide(nil, Look{Windows: []Seen{saw(1, "S1", full)}, Visible: vis("S9")})
+	ds := Decide(nil, Look{Windows: []Seen{saw(1, "S1", full)}})
 	wantKinds(t, ds, Adopt)
 	if ds[0].Window != 0 {
 		t.Fatalf("a never-seen window has no store identity yet, got %d", ds[0].Window)
@@ -80,7 +72,7 @@ func TestDecideFirstSightingAdopts(t *testing.T) {
 
 func TestDecideBoundWithoutPlacementAdoptsForTheSameWindow(t *testing.T) {
 	r := Recorded{Window: 7, Binding: 1}
-	ds := Decide([]Recorded{r}, Look{Windows: []Seen{saw(1, "S1", full)}, Visible: vis("S1")})
+	ds := Decide([]Recorded{r}, Look{Windows: []Seen{saw(1, "S1", full)}})
 	wantKinds(t, ds, Adopt)
 	if ds[0].Window != 7 {
 		t.Fatalf("Window = %d, want 7", ds[0].Window)
@@ -89,98 +81,88 @@ func TestDecideBoundWithoutPlacementAdoptsForTheSameWindow(t *testing.T) {
 
 func TestDecideInPlaceIsSilent(t *testing.T) {
 	jitter := layout.Rect{X: 1, Y: 30, W: 1279, H: 1410}
-	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S1", jitter)}, Visible: vis("S1")})
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S1", jitter)}})
 	wantKinds(t, ds)
 }
 
-func TestDecideChangeOnAVisibleSpaceIsAdopted(t *testing.T) {
-	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, Visible: vis("S1")})
+func sys(bindings ...uint32) map[uint32]bool {
+	m := map[uint32]bool{}
+	for _, b := range bindings {
+		m[b] = true
+	}
+	return m
+}
+
+func TestDecideUserChangeMovesTheTarget(t *testing.T) {
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}})
 	wantKinds(t, ds, Adopt)
 	if ds[0].Window != 101 {
 		t.Fatalf("Window = %d, want 101", ds[0].Window)
 	}
 }
 
-func TestDecideMoveOffAVisibleSpaceIsAdopted(t *testing.T) {
-	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S2", full)}, Visible: vis("S1")})
+func TestDecideUserMoveToAnotherSpaceMovesTheTarget(t *testing.T) {
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S2", full)}})
 	wantKinds(t, ds, Adopt)
 }
 
-func TestDecideChangeOnAnUnseenSpaceIsOwed(t *testing.T) {
-	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, Visible: vis("S9")})
-	wantKinds(t, ds, Owe, Repair)
+func TestDecideSystemChangeIsDirtyAndPut(t *testing.T) {
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, System: sys(1)})
+	wantKinds(t, ds, Dirty, Put)
 	if ds[1].Move || !ds[1].Resize || ds[1].Want.Frame != full {
-		t.Fatalf("on the right space at the wrong frame: resize, wherever its space is: %+v", ds[1])
+		t.Fatalf("on the right space at the wrong frame: resize only: %+v", ds[1])
 	}
 	if p, ok := ds[1].Progress(); !ok || p != Attempted {
 		t.Fatalf("Progress = %v %v, want Attempted", p, ok)
 	}
 }
 
-func TestDecideUnseenSpaceChangeIsMovedBack(t *testing.T) {
-	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S2", full)}, Visible: vis("S9")})
-	wantKinds(t, ds, Owe, Repair)
+func TestDecideSystemMoveToAnotherSpaceIsPutBack(t *testing.T) {
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Windows: []Seen{saw(1, "S2", full)}, System: sys(1)})
+	wantKinds(t, ds, Dirty, Put)
 	if !ds[1].Move || ds[1].Resize || ds[1].Want.Space != "S1" {
 		t.Fatalf("want a move back to S1 only, got %+v", ds[1])
 	}
-	if p, ok := ds[1].Progress(); !ok || p != Attempted {
-		t.Fatalf("frame already right, so the move completes the repair: got %v %v", p, ok)
-	}
 }
 
-func owedRec(binding uint32, space string, f layout.Rect, p Progress) Recorded {
+func dirtyRec(binding uint32, space string, f layout.Rect, p Progress) Recorded {
 	r := rec(binding, space, f)
-	r.Owed, r.Progress = true, p
+	r.Dirty, r.Progress = true, p
 	return r
 }
 
-func TestDecideOwedSeenInPlaceIsReleased(t *testing.T) {
-	ds := Decide([]Recorded{owedRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S1", full)}, Visible: vis("S9")})
-	wantKinds(t, ds, Release)
+func TestDecideDirtyAtTargetIsClean(t *testing.T) {
+	ds := Decide([]Recorded{dirtyRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S1", full)}, System: sys(1)})
+	wantKinds(t, ds, Clean)
+	ds = Decide([]Recorded{dirtyRec(1, "S1", full, Attempted)}, Look{Windows: []Seen{saw(1, "S1", full)}})
+	wantKinds(t, ds, Clean)
 }
 
-func TestDecideOwedIsResizedWhereverItsSpaceIs(t *testing.T) {
-	ds := Decide([]Recorded{owedRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, Visible: vis("S9")})
-	wantKinds(t, ds, Repair)
-	if ds[0].Move || !ds[0].Resize || ds[0].Want.Frame != full {
-		t.Fatalf("want a resize to the recorded frame, got %+v", ds[0])
-	}
-	if p, _ := ds[0].Progress(); p != Attempted {
-		t.Fatalf("Progress = %v, want Attempted", p)
-	}
-}
-
-func TestDecideOwedDriftingUnseenIsResized(t *testing.T) {
-	drift := layout.Rect{X: 0, Y: 33, W: 735, H: 923}
-	ds := Decide([]Recorded{owedRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S1", drift)}, Visible: vis("S9")})
-	wantKinds(t, ds, Repair)
-	if ds[0].Move || !ds[0].Resize {
-		t.Fatalf("want a resize, got %+v", ds[0])
+func TestDecideDirtyOffTargetIsPut(t *testing.T) {
+	ds := Decide([]Recorded{dirtyRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S2", shrunk)}, System: sys(1)})
+	wantKinds(t, ds, Put)
+	if !ds[0].Move || !ds[0].Resize || ds[0].Want != (Placement{"S1", full}) {
+		t.Fatalf("want move and resize to the target, got %+v", ds[0])
 	}
 }
 
-func TestDecideOwedOnTheWrongSpaceAtTheWrongFrameIsMovedAndResized(t *testing.T) {
-	ds := Decide([]Recorded{owedRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S2", shrunk)}, Visible: vis("S9")})
-	wantKinds(t, ds, Repair)
-	if !ds[0].Move || !ds[0].Resize {
-		t.Fatalf("want move and resize, got %+v", ds[0])
+func TestDecideFailedPutIsReportedOnce(t *testing.T) {
+	ds := Decide([]Recorded{dirtyRec(1, "S1", full, Attempted)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, System: sys(1)})
+	wantKinds(t, ds, Failed)
+	if ds[0].Want != (Placement{"S1", full}) || ds[0].Move || ds[0].Resize {
+		t.Fatalf("a failed put names the target and orders nothing: %+v", ds[0])
 	}
-	if p, _ := ds[0].Progress(); p != Attempted {
-		t.Fatalf("Progress = %v, want Attempted", p)
+	if _, ok := ds[0].Progress(); ok {
+		t.Fatal("a failed put records no progress")
 	}
 }
 
-func TestDecideGivesUpAfterAFullAttempt(t *testing.T) {
-	ds := Decide([]Recorded{owedRec(1, "S1", full, Attempted)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, Visible: vis("S1")})
-	wantKinds(t, ds, GiveUp)
-}
-
-func TestDecideGivesUpWhenStillOnTheWrongSpaceAfterAnAttempt(t *testing.T) {
-	ds := Decide([]Recorded{owedRec(1, "S1", full, Attempted)}, Look{Windows: []Seen{saw(1, "S2", full)}, Visible: vis("S9")})
-	wantKinds(t, ds, GiveUp)
+func TestDecideUserMoveOfADirtyWindowMovesTheTarget(t *testing.T) {
+	ds := Decide([]Recorded{dirtyRec(1, "S1", full, Attempted)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}})
+	wantKinds(t, ds, Adopt)
 }
 
 func TestDecideIgnoresRecordedWindowsNotSeen(t *testing.T) {
-	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{Visible: vis("S1")})
+	ds := Decide([]Recorded{rec(1, "S1", full)}, Look{})
 	wantKinds(t, ds)
 }

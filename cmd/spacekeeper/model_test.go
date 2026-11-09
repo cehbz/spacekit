@@ -148,8 +148,8 @@ func TestModelHoldsWhilePuttingThenGivesUp(t *testing.T) {
 	expectNone(t, out, 100*time.Millisecond) // held while putting
 	b.Publish(PutEnded{Stamp: event.Now()})  // the put did not take: Current unchanged
 	ds := decisionsOf(t, out, 1)
-	if ds[0].Kind != arrangement.GiveUp || ds[0].Seen.Binding != 2 {
-		t.Fatalf("after an unconfirmed put: %+v, want give up on window 2", ds[0])
+	if ds[0].Kind != arrangement.Failed || ds[0].Seen.Binding != 2 {
+		t.Fatalf("after an unconfirmed put: %+v, want a failed put on window 2", ds[0])
 	}
 }
 
@@ -168,8 +168,8 @@ func TestModelPutEndedJudgesPutWindows(t *testing.T) {
 	expectEvent(t, out, PutWanted{}, 2*time.Second)
 	b.Publish(PutEnded{Stamp: event.Now()}) // nothing confirmed, nothing pending: Current unchanged
 	ds := decisionsOf(t, out, 1)
-	if len(ds) != 1 || ds[0].Kind != arrangement.GiveUp || ds[0].Seen.Binding != 2 {
-		t.Fatalf("after a put that confirmed nothing: %+v, want give up on window 2 only", ds)
+	if len(ds) != 1 || ds[0].Kind != arrangement.Failed || ds[0].Seen.Binding != 2 {
+		t.Fatalf("after a put that confirmed nothing: %+v, want a failed put on window 2 only", ds)
 	}
 	expectNone(t, out, 100*time.Millisecond)
 }
@@ -263,7 +263,7 @@ func TestModelDisplayRunHoldsThenOwesShownWindow(t *testing.T) {
 	for _, d := range tc.Decisions {
 		kinds[d.Seen.Binding] = d.Kind
 	}
-	if kinds[1] != arrangement.Repair {
+	if kinds[1] != arrangement.Put {
 		t.Fatalf("window 1 %v after a display run, want repair", kinds[1])
 	}
 	pw := expectEvent(t, out, PutWanted{}, 2*time.Second).(PutWanted)
@@ -307,7 +307,7 @@ func TestModelWindowQuietBindsAgainstRivals(t *testing.T) {
 		want  arrangement.Kind
 	}{
 		{"rival present", true, arrangement.Adopt},
-		{"no rival", false, arrangement.Repair},
+		{"no rival", false, arrangement.Put},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			st := tempStore(t)
@@ -366,7 +366,7 @@ func TestModelDisplayQuietWithoutCurrentReleases(t *testing.T) {
 	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
 	b.Publish(Reconciled{Stamp: event.Now(), Cause: "display quiet"})
 	for _, d := range decisionsOf(t, out, 2) {
-		if d.Kind != arrangement.Release {
+		if d.Kind != arrangement.Clean {
 			t.Fatalf("decision %+v, want release: owed by the display run and in place", d)
 		}
 	}

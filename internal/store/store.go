@@ -173,7 +173,7 @@ func (s *Store) Spaces(arr int64) ([]layout.SavedSpace, error) {
 }
 
 // Recorded returns the windows bound in this boot with their current
-// placement in the arrangement, if any, and whether they are owed.
+// placement in the arrangement, if any, and whether they are dirty.
 func (s *Store) Recorded(arr int64, boot time.Time) ([]arrangement.Recorded, error) {
 	rows, err := s.db.Query(`
 		SELECT w.id, b.wid, p.space, p.x, p.y, p.w, p.h, o.progress
@@ -202,14 +202,14 @@ func (s *Store) Recorded(arr int64, boot time.Time) ([]arrangement.Recorded, err
 				Frame: layout.Rect{X: x.Float64, Y: y.Float64, W: w.Float64, H: h.Float64}}
 		}
 		if progress.Valid {
-			r.Owed, r.Progress = true, arrangement.Progress(progress.Int64)
+			r.Dirty, r.Progress = true, arrangement.Progress(progress.Int64)
 		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
 }
 
-// Apply records what a look decided, in one transaction and under one
+// Apply records what a decide decided, in one transaction and under one
 // change. Decisions that alter nothing write nothing.
 func (s *Store) Apply(arr int64, boot, at time.Time, cause string, ds []arrangement.Decision) error {
 	if !writes(ds) {
@@ -235,7 +235,7 @@ func (s *Store) Apply(arr int64, boot, at time.Time, cause string, ds []arrangem
 
 func writes(ds []arrangement.Decision) bool {
 	for _, d := range ds {
-		if d.Kind != arrangement.Repair {
+		if d.Kind != arrangement.Put {
 			return true
 		}
 		if _, ok := d.Progress(); ok {
@@ -255,30 +255,27 @@ func apply(tx *sql.Tx, change, arr int64, boot, at time.Time, d arrangement.Deci
 				return err
 			}
 		}
+		if _, err := tx.Exec(`DELETE FROM owed WHERE window_id = ? AND arrangement_id = ?`, win, arr); err != nil {
+			return err
+		}
 		if err := place(tx, change, arr, win, d.Seen.Placement); err != nil {
 			return err
 		}
 		return event(tx, change, win, "adopted")
-	case arrangement.Owe:
+	case arrangement.Dirty:
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO owed(window_id, arrangement_id, progress, since) VALUES (?, ?, 0, ?)`,
 			win, arr, change); err != nil {
 			return err
 		}
-		return event(tx, change, win, "owed")
-	case arrangement.Release:
+		return event(tx, change, win, "dirty")
+	case arrangement.Clean:
 		if _, err := tx.Exec(`DELETE FROM owed WHERE window_id = ? AND arrangement_id = ?`, win, arr); err != nil {
 			return err
 		}
-		return event(tx, change, win, "released")
-	case arrangement.GiveUp:
-		if _, err := tx.Exec(`DELETE FROM owed WHERE window_id = ? AND arrangement_id = ?`, win, arr); err != nil {
-			return err
-		}
-		if err := place(tx, change, arr, win, d.Seen.Placement); err != nil {
-			return err
-		}
-		return event(tx, change, win, "gave up")
-	case arrangement.Repair:
+		return event(tx, change, win, "clean")
+	case arrangement.Failed:
+		return event(tx, change, win, "failed")
+	case arrangement.Put:
 		p, ok := d.Progress()
 		if !ok {
 			return nil
@@ -286,7 +283,7 @@ func apply(tx *sql.Tx, change, arr int64, boot, at time.Time, d arrangement.Deci
 		if _, err := tx.Exec(`UPDATE owed SET progress = ? WHERE window_id = ? AND arrangement_id = ?`, int(p), win, arr); err != nil {
 			return err
 		}
-		return event(tx, change, win, "repaired")
+		return event(tx, change, win, "put")
 	}
 	return nil
 }
