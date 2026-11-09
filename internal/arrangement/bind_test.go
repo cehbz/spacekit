@@ -16,7 +16,39 @@ func fresh(wid uint32, title string, f layout.Rect) Seen {
 // left is a stored Chrome window bound earlier in this boot.
 func left(win int64, title string, space string, f layout.Rect) Stored {
 	return Stored{Window: win, Bundle: "com.google.Chrome", App: "Google Chrome", Title: title,
-		Placement: Placement{Space: space, Frame: f}, Boot: thisBoot, Binding: uint32(win)}
+		Placement: Placement{Space: space, Frame: f}, Placed: true, Boot: thisBoot, Binding: uint32(win)}
+}
+
+// elsewhere is a stored Chrome window with a record only in another
+// arrangement: no placement here, last bound in an earlier boot.
+func elsewhere(win int64, title string) Stored {
+	return Stored{Window: win, Bundle: "com.google.Chrome", App: "Google Chrome", Title: title,
+		Boot: thisBoot - 86400, Binding: uint32(win)}
+}
+
+func TestBindUnplacedCandidateOnTitle(t *testing.T) {
+	got := Bind([]Seen{fresh(900, "autobrr", full)}, []Stored{elsewhere(1, "autobrr")}, thisBoot, map[uint32]bool{900: true})
+	if got[900] != 1 {
+		t.Fatalf("got %v, want 900->1: a record from another arrangement binds on title", got)
+	}
+}
+
+func TestBindUnplacedCandidateNeverOnFrame(t *testing.T) {
+	// An unplaced candidate has no frame here; a window near the origin must
+	// not match its empty one.
+	tiny := layout.Rect{X: 0, Y: 0, W: 2, H: 2}
+	got := Bind([]Seen{fresh(900, "renamed", tiny)}, []Stored{elsewhere(1, "autobrr")}, thisBoot, map[uint32]bool{900: true})
+	if len(got) != 0 {
+		t.Fatalf("got %v, want nothing: no placement here means no frame evidence", got)
+	}
+}
+
+func TestBindUnplacedTwinsAreAmbiguous(t *testing.T) {
+	st := []Stored{elsewhere(1, "autobrr"), elsewhere(2, "autobrr")}
+	got := Bind([]Seen{fresh(900, "autobrr", full)}, st, thisBoot, map[uint32]bool{900: true})
+	if len(got) != 0 {
+		t.Fatalf("got %v, want nothing: two unplaced records with the title", got)
+	}
 }
 
 var (
