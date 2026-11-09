@@ -15,21 +15,20 @@ import (
 
 // Timing. A display wake produces two hotplug out/in cycles over ~6s and
 // WindowServer's own window-return attempts give up ~7s after the first, so
-// displayQuiet after the last callback lands after macOS has finished.
+// displaySettle after the last callback lands after macOS has finished.
+// Chrome keeps restoring windows for up to 16 s after the last hotplug "in",
+// so window changes within displayGrace of the settle are the display
+// change's.
 const (
-	displayQuiet = 10 * time.Second
-	spaceQuiet   = 3 * time.Second
-	// displayGrace: window changes this soon after displays settle are the
-	// display change's; the window server and Chrome keep moving windows for
-	// up to 16 s after the last hotplug.
-	displayGrace = 20 * time.Second
+	displaySettle = 10 * time.Second
+	displayGrace  = 20 * time.Second
+	// windowSettle debounces window-server window events: a drag reports a
+	// move per frame, with gaps inside a stroke under 300 ms.
+	windowSettle = 500 * time.Millisecond
 	// putGrace: a put's windows stay the put's this long after it ends; the
 	// settler's 500 ms debounce lands a put's last window settle after
 	// PutEnded, and a step waits up to stepTimeout for confirmation.
 	putGrace = 2 * time.Second
-	// windowQuiet debounces window-server window events: a drag reports a
-	// move per frame, with gaps inside a stroke under 300 ms.
-	windowQuiet = 500 * time.Millisecond
 	// retention is how long history is kept.
 	retention = 90 * 24 * time.Hour
 	// pruneEvery is the number of ticks between prunes (one-minute ticks).
@@ -37,7 +36,7 @@ const (
 	streamRetention = 7 * 24 * time.Hour // how long the raw event stream is kept
 )
 
-// stepTimeout bounds each awaited step of a repair.
+// stepTimeout bounds each awaited step of a put.
 const stepTimeout = 2 * time.Second
 
 type watchOptions struct {
@@ -68,7 +67,7 @@ func displaySet(spaces []layout.SavedSpace) string {
 	return strings.Join(ids, ",")
 }
 
-// seenWindows are the gathered windows on user desktops; fullscreen
+// seenWindows are the snapshot's windows on user desktops; fullscreen
 // windows are not placed.
 func seenWindows(s *snapshot) []arrangement.Seen {
 	out := make([]arrangement.Seen, 0, len(s.windows))

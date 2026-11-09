@@ -30,7 +30,7 @@ func logCmd(last int, verbose bool) error {
 		return err
 	}
 	// Spans that began before the first change shown are left out; their
-	// quiet then has no began and is skipped.
+	// end then has no began and is skipped.
 	var from time.Time
 	if len(entries) > 0 {
 		from = entries[0].At
@@ -102,7 +102,7 @@ func placement(p *arrangement.Placement) string {
 }
 
 // undoCmd reverts one change; the running agent puts the windows back at its
-// next look.
+// next decide.
 func undoCmd(arg string) error {
 	id, err := strconv.ParseInt(strings.TrimPrefix(arg, "#"), 10, 64)
 	if err != nil {
@@ -121,12 +121,12 @@ func undoCmd(arg string) error {
 	if skipped > 0 {
 		fmt.Printf(", left %d that changed again since", skipped)
 	}
-	fmt.Println("; the agent puts them back at its next look")
+	fmt.Println("; the agent puts them back at its next decide")
 	return nil
 }
 
-// oweCmd marks every window of the current arrangement owed; the running
-// agent puts them back at its next look.
+// oweCmd marks every window of the current arrangement dirty; the running
+// agent puts them back at its next decide.
 func oweCmd() error {
 	s, err := gather()
 	if err != nil {
@@ -145,7 +145,7 @@ func oweCmd() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("%d window(s) owed their placement; the agent puts them back at its next look\n", n)
+	fmt.Printf("%d window(s) marked dirty; the agent puts them back at its next decide\n", n)
 	return nil
 }
 

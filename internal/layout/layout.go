@@ -46,8 +46,8 @@ type CurrentDisplay struct {
 }
 
 // OverviewOpen reports whether Mission Control or App Exposé is showing.
-// While either is, CGWindow bounds are the scaled thumbnails, so a layout
-// gathered then is not one to keep. WindowManager's ExposeShieldWindow is
+// While either is, CGWindow bounds are the scaled thumbnails, so a read
+// taken then is not one to validate against. WindowManager's ExposeShieldWindow is
 // in the window list from entry to exit of both.
 func OverviewOpen(all []ListedWindow) bool {
 	for _, l := range all {

@@ -59,7 +59,7 @@ type Seen struct {
 	Placement
 }
 
-// Look is one decide's input: the windows in Current to judge, and which of
+// Look is one decide's input: the windows in Current to decide, and which of
 // them changed for a system cause (a display change, a reappearance after a
 // reboot or relaunch, a put). A window not in System changed for the user.
 type Look struct {

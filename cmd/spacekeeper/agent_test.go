@@ -8,8 +8,8 @@ import (
 	"github.com/cehbz/spacekit/internal/bus"
 )
 
-// The wired agent: Current reaches the model and a startup judgement is
-// made, with every process running and stopping on cancel.
+// The wired agent: Current reaches the model and a startup decide
+// runs, with every process running and stopping on cancel.
 func TestAgentStartsAndStops(t *testing.T) {
 	b := bus.New()
 	st := tempStore(t)

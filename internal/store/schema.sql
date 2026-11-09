@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS change (
   note  TEXT    NOT NULL DEFAULT ''
 );
 
--- What a change did to one window: adopted, owed, released, gave up, repaired.
+-- What a change did to one window: adopted, bound, dirty, put, clean, failed,
+-- undone; older rows also owed, repaired, released, gave up.
 CREATE TABLE IF NOT EXISTS event (
   id        INTEGER PRIMARY KEY,
   change_id INTEGER NOT NULL REFERENCES change(id),
@@ -61,7 +62,7 @@ CREATE TABLE IF NOT EXISTS placement (
 CREATE UNIQUE INDEX IF NOT EXISTS placement_current
   ON placement(window_id, arrangement_id) WHERE closed_by IS NULL;
 
--- Windows owed their placement, with how far the last repair got.
+-- The dirty windows, with how far the last put got.
 CREATE TABLE IF NOT EXISTS owed (
   window_id      INTEGER NOT NULL REFERENCES window(id),
   arrangement_id INTEGER NOT NULL REFERENCES arrangement(id),

@@ -29,7 +29,7 @@ type agentDeps struct {
 // returns a function that waits for them after ctx is cancelled. The
 // journal is not among them: it runs until the bus closes.
 func runAgent(ctx context.Context, b *bus.Bus, st *store.Store, o watchOptions, d agentDeps) func() {
-	settler := newSettler(b, windowQuiet, spaceQuiet, displayQuiet)
+	settler := newSettler(b, windowSettle, displaySettle)
 	sc := newScreen(b, d.reader, d.onMain)
 	sc.send = d.send
 	model := newModel(b, st)
@@ -68,7 +68,7 @@ func watchCmd(o watchOptions) error {
 		log.Printf("%v; the screen follows the tick only", err)
 	}
 	if err := sysevents.ObserveDock(); err != nil {
-		log.Printf("%v; the overview is seen at reconciliation only", err)
+		log.Printf("%v; the overview is seen at validation only", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	wait := runAgent(ctx, b, st, o, agentDeps{reader: liveReader{}, orders: liveOrders{}, onMain: sysevents.OnMain, send: skylight.RequestWindowNotifications})

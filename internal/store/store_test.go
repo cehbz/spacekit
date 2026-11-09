@@ -37,7 +37,7 @@ func count(t *testing.T, s *Store, query string, args ...any) int {
 }
 
 // arrangementWith returns the arrangement for a display set with the given
-// space keys recorded, as a judgement records them before placing windows.
+// space keys recorded, as a decide records them before placing windows.
 func arrangementWith(t *testing.T, s *Store, displaySet string, keys ...string) int64 {
 	t.Helper()
 	arr, err := s.Arrangement(displaySet)
@@ -285,7 +285,7 @@ func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
 	rs, _ := s.Recorded(arr, boot)
 	for _, r := range rs {
 		if !r.Dirty || r.Progress != arrangement.Untried {
-			t.Fatalf("every placed window owed afresh: %+v", r)
+			t.Fatalf("every placed window dirty afresh: %+v", r)
 		}
 	}
 	if n, _ := s.OweAll(arr, boot.Add(time.Hour), t0, "display change", []uint32{1, 2}); n != 0 {
@@ -413,7 +413,7 @@ func TestStoredCarriesTheLatestBinding(t *testing.T) {
 	}
 }
 
-func TestBindGivesAStoredWindowAFreshIdAndOwesIt(t *testing.T) {
+func TestBindGivesAStoredWindowAFreshIdAndMarksItDirty(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S2", "S5")
 	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S2", full)}}); err != nil {
@@ -432,7 +432,7 @@ func TestBindGivesAStoredWindowAFreshIdAndOwesIt(t *testing.T) {
 		}
 	}
 	if got == nil || got.Window != st[0].Window || !got.Dirty || got.Space != "S2" {
-		t.Fatalf("the fresh id is the same window, owed its recorded placement: %+v", rs)
+		t.Fatalf("the fresh id is the same window, dirty against its recorded placement: %+v", rs)
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM window`); n != 1 {
 		t.Fatalf("binding must not create a window: %d", n)
@@ -483,7 +483,7 @@ func TestJournalShowsWhatEachChangeDid(t *testing.T) {
 	}
 }
 
-func TestUndoRestoresThePriorPlacementAndOwesTheWindow(t *testing.T) {
+func TestUndoRestoresThePriorPlacementAndMarksTheWindowDirty(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	r := adoptNew(t, s, arr, 42, "S1", full)
@@ -497,7 +497,7 @@ func TestUndoRestoresThePriorPlacementAndOwesTheWindow(t *testing.T) {
 	}
 	got := one(t, s, arr)
 	if got.Space != "S1" || got.Frame != full || !got.Dirty || got.Progress != arrangement.Untried {
-		t.Fatalf("back at the prior placement and owed: %+v", got)
+		t.Fatalf("back at the prior placement and dirty: %+v", got)
 	}
 	j, _ := s.Journal(1)
 	if j[0].Cause != "undo" || len(j[0].Events) != 1 || j[0].Events[0].Kind != "undone" {
@@ -588,9 +588,9 @@ func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 	}
 }
 
-// A window closed since it was recorded has nothing that could release it,
+// A window closed since it was recorded has nothing that could clean it,
 // and a window recreated under a fresh id has two bindings in the boot: only
-// windows on screen are owed, each once.
+// windows on screen are marked dirty, each once.
 func TestOweAllOwesOnlyWindowsOnScreenEachOnce(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1")
@@ -610,7 +610,7 @@ func TestOweAllOwesOnlyWindowsOnScreenEachOnce(t *testing.T) {
 		t.Fatalf("owed rows = %d, want 1", got)
 	}
 	if got := count(t, s, `SELECT window_id FROM owed`); int64(got) != a.Window {
-		t.Fatalf("the window on screen is the one owed: %d", got)
+		t.Fatalf("the window on screen is the one marked dirty: %d", got)
 	}
 }
 
@@ -678,9 +678,9 @@ func TestStoredReturnsWindowsPlacedElsewhereUnplaced(t *testing.T) {
 	}
 }
 
-// Binding a window that has no placement here owes it nothing: the next
-// judgement adopts it where it is.
-func TestBindToAWindowUnplacedHereOwesNothing(t *testing.T) {
+// Binding a window that has no placement here does not mark it dirty: the
+// next decide adopts it where it is.
+func TestBindToAWindowUnplacedHereIsNotDirty(t *testing.T) {
 	s := open(t)
 	air, _ := s.Arrangement("D1")
 	dual := arrangementWith(t, s, "D1,D2", "S9")
@@ -697,7 +697,7 @@ func TestBindToAWindowUnplacedHereOwesNothing(t *testing.T) {
 	}
 	rs, _ := s.Recorded(air, boot2)
 	if len(rs) != 1 || rs[0].Window != st[0].Window || rs[0].Placed || rs[0].Dirty {
-		t.Fatalf("Recorded(air) = %+v; want the same window, unplaced, not owed", rs)
+		t.Fatalf("Recorded(air) = %+v; want the same window, unplaced, not dirty", rs)
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM owed`); n != 0 {
 		t.Fatalf("owed rows = %d, want 0", n)

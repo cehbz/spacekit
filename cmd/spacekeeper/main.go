@@ -30,18 +30,20 @@ func usage() {
 	fmt.Fprint(os.Stderr, `usage: spacekeeper <command> [flags]
 
 commands:
-  watch     run resident: keep the arrangement and put windows back (the
-            launchd agent)
+  watch     run resident: keep the arrangement and put dirty windows back
+            (the launchd agent)
   inspect   print every recorded window with its space, CGWindow bounds, and
             the frame its app reports via Accessibility (needs Accessibility)
   log       list recent changes to the arrangement and display disturbances
   undo N    revert change N from the log; the agent puts the windows back
-  owe       have the agent put every window back at its recorded placement
+            at its next decide
+  owe       mark every window dirty; the agent puts the windows back at its
+            next decide
   place [-space id] W X Y WIDTH HEIGHT
             move or resize window W (needs Accessibility; for on-machine tests)
 
 flags (after the command):
-  -interval D  watch: reconciliation tick (default 1m)
+  -interval D  watch: validation tick (default 1m)
   -last N   log: how many changes to show (default 20)
   -v        log: one line per window under each change
   -events   log: the raw event stream instead of changes
@@ -57,7 +59,7 @@ func main() {
 	}
 	cmd := os.Args[1]
 	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-	interval := fs.Duration("interval", time.Minute, "watch: reconciliation tick")
+	interval := fs.Duration("interval", time.Minute, "watch: validation tick")
 	last := fs.Int("last", 20, "log: changes to show")
 	verbose := fs.Bool("v", false, "log: per-window lines")
 	events := fs.Bool("events", false, "log: the raw event stream instead of changes")

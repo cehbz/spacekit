@@ -2,13 +2,13 @@ package arrangement
 
 // Stored is a window as the store last knew it bound: a candidate for
 // binding to a fresh window-server id once that binding is dead. Placement is
-// its open placement in the arrangement being judged when Placed; a candidate
+// its open placement in the arrangement being decided when Placed; a candidate
 // recorded only elsewhere offers no frame evidence.
 type Stored struct {
 	Window             int64
 	Bundle, App, Title string
 	Placement
-	Placed  bool   // has an open placement in the arrangement being judged
+	Placed  bool   // has an open placement in the arrangement being decided
 	Boot    int64  // boot (unix seconds) of its latest binding; 0 if it has none
 	Binding uint32 // window-server id in that boot
 }

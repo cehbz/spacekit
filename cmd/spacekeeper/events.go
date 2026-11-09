@@ -19,11 +19,8 @@ type WindowQuiet struct {
 	Window uint32
 }
 
-// SpaceBurstBegan and SpaceQuiet bracket a run of space events.
-type SpaceBurstBegan struct{ event.Stamp }
-type SpaceQuiet struct{ event.Stamp }
-
-// DisplayBurstBegan and DisplayQuiet bracket a run of display reconfigurations.
+// DisplayBurstBegan and DisplayQuiet bracket a run of display
+// reconfigurations; the model decides every window when it ends.
 type DisplayBurstBegan struct{ event.Stamp }
 type DisplayQuiet struct{ event.Stamp }
 
@@ -43,32 +40,21 @@ type WindowChanged struct {
 	Gone   bool
 }
 
-// Difference is one thing reconciliation found Current had wrong.
+// Difference is one thing validation found Current had wrong.
 type Difference struct {
 	event.Stamp
 	Text string
 }
 
-// Reconciled says the reconciliation for a cause has run, naming it
-// (event.Name of the Tick, SpaceQuiet, DisplayQuiet or OverviewEnded). It
-// follows every cause the screen handles, with or without a Current change,
-// and comes after the CurrentChanged when there is one, so a consumer can
-// act on the Current that reconciliation left rather than on the event that
-// triggered it.
-type Reconciled struct {
-	event.Stamp
-	Cause string
-}
-
-// TargetChanged is one change to Target: a judgement's decisions.
+// TargetChanged is one change to Target: a decide's decisions.
 type TargetChanged struct {
 	event.Stamp
 	Cause     string
 	Decisions []arrangement.Decision
 }
 
-// PutWanted asks for owed windows to be put where they should be, with the
-// Current and spaces the judgement was made from.
+// PutWanted asks for dirty windows to be put where they should be, with the
+// Current and spaces the decide ran on.
 type PutWanted struct {
 	event.Stamp
 	Arr       int64

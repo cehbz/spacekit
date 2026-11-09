@@ -38,41 +38,31 @@ func TestWindowQuietPerWindow(t *testing.T) {
 	out := b.Subscribe("t", WindowQuiet{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go newSettler(b, 150*time.Millisecond, time.Second, time.Second).run(ctx)
+	go newSettler(b, 150*time.Millisecond, time.Second).run(ctx)
 	b.Publish(WindowChanged{Stamp: event.Now(), Window: 1})
 	b.Publish(WindowChanged{Stamp: event.Now(), Window: 2})
 	time.Sleep(30 * time.Millisecond)
 	b.Publish(WindowChanged{Stamp: event.Now(), Window: 1}) // keeps 1 busy
 	if e := expectEvent(t, out, WindowQuiet{}, 400*time.Millisecond); e.(WindowQuiet).Window != 2 {
-		t.Fatalf("first quiet %+v, want window 2", e)
+		t.Fatalf("first settled %+v, want window 2", e)
 	}
 	if e := expectEvent(t, out, WindowQuiet{}, 400*time.Millisecond); e.(WindowQuiet).Window != 1 {
-		t.Fatalf("second quiet %+v, want window 1", e)
+		t.Fatalf("second settled %+v, want window 1", e)
 	}
 }
 
-func TestWindowEventsInsideSpaceRunAreDropped(t *testing.T) {
+func TestSpaceEventsDoNotSettle(t *testing.T) {
 	b := bus.New()
-	out := b.Subscribe("t", WindowQuiet{}, SpaceQuiet{})
+	out := b.Subscribe("t", WindowQuiet{}, DisplayQuiet{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go newSettler(b, 20*time.Millisecond, 100*time.Millisecond, time.Second).run(ctx)
-	b.Publish(event.SpaceSwitched{Stamp: event.Now()})
+	go newSettler(b, 150*time.Millisecond, time.Second).run(ctx)
 	b.Publish(WindowChanged{Stamp: event.Now(), Window: 1})
-	expectEvent(t, out, SpaceQuiet{}, 300*time.Millisecond)
-	expectNone(t, out, 100*time.Millisecond)
-}
-
-func TestSpaceRunClosesOpenWindowRuns(t *testing.T) {
-	b := bus.New()
-	out := b.Subscribe("t", WindowQuiet{}, SpaceQuiet{})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go newSettler(b, 50*time.Millisecond, 100*time.Millisecond, time.Second).run(ctx)
-	b.Publish(WindowChanged{Stamp: event.Now(), Window: 1})
-	b.Publish(event.SpaceSwitched{Stamp: event.Now()})
-	expectEvent(t, out, SpaceQuiet{}, 300*time.Millisecond)
-	expectNone(t, out, 100*time.Millisecond)
+	b.Publish(event.SpaceSwitched{Stamp: event.Now()}) // a switch neither opens a run nor drops window 1's
+	if e := expectEvent(t, out, WindowQuiet{}, 400*time.Millisecond); e.(WindowQuiet).Window != 1 {
+		t.Fatalf("settled %+v, want window 1", e)
+	}
+	expectNone(t, out, 300*time.Millisecond)
 }
 
 func TestDisplayRunEvents(t *testing.T) {
@@ -80,7 +70,7 @@ func TestDisplayRunEvents(t *testing.T) {
 	out := b.Subscribe("t", DisplayBurstBegan{}, DisplayQuiet{}, WindowQuiet{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go newSettler(b, 20*time.Millisecond, time.Second, 60*time.Millisecond).run(ctx)
+	go newSettler(b, 20*time.Millisecond, 60*time.Millisecond).run(ctx)
 	b.Publish(WindowChanged{Stamp: event.Now(), Window: 3})
 	b.Publish(event.DisplayReconfigured{Stamp: event.Now()})
 	expectEvent(t, out, DisplayBurstBegan{}, 100*time.Millisecond)
@@ -94,7 +84,7 @@ func TestWindowEventsInsideDisplayRunAreDropped(t *testing.T) {
 	out := b.Subscribe("t", DisplayBurstBegan{}, DisplayQuiet{}, WindowQuiet{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go newSettler(b, 20*time.Millisecond, time.Second, 100*time.Millisecond).run(ctx)
+	go newSettler(b, 20*time.Millisecond, 100*time.Millisecond).run(ctx)
 	b.Publish(event.DisplayReconfigured{Stamp: event.Now()})
 	b.Publish(WindowChanged{Stamp: event.Now(), Window: 3})
 	expectEvent(t, out, DisplayBurstBegan{}, 100*time.Millisecond)
@@ -104,27 +94,12 @@ func TestWindowEventsInsideDisplayRunAreDropped(t *testing.T) {
 
 // The window debounce runs on the screen's WindowChanged: a raw window
 // event alone is not yet in Current, so it settles nothing.
-func TestRawWindowEventMakesNoQuiet(t *testing.T) {
+func TestRawWindowEventSettlesNothing(t *testing.T) {
 	b := bus.New()
 	out := b.Subscribe("t", WindowQuiet{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go newSettler(b, 20*time.Millisecond, time.Second, time.Second).run(ctx)
+	go newSettler(b, 20*time.Millisecond, time.Second).run(ctx)
 	b.Publish(event.WindowMoved{Stamp: event.Now(), Window: 1})
 	expectNone(t, out, 150*time.Millisecond)
-}
-
-func TestSpaceRunEvents(t *testing.T) {
-	b := bus.New()
-	out := b.Subscribe("t", SpaceBurstBegan{}, SpaceQuiet{})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go newSettler(b, 20*time.Millisecond, 60*time.Millisecond, time.Second).run(ctx)
-	for range 2 {
-		b.Publish(event.SpaceSwitched{Stamp: event.Now()})
-		b.Publish(event.SpaceCreated{Stamp: event.Now()}) // extends; no second began
-		expectEvent(t, out, SpaceBurstBegan{}, 100*time.Millisecond)
-		expectEvent(t, out, SpaceQuiet{}, 300*time.Millisecond)
-		expectNone(t, out, 50*time.Millisecond)
-	}
 }

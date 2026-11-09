@@ -80,7 +80,7 @@ func TestModelStartupAdoptsCurrent(t *testing.T) {
 	}
 }
 
-func TestModelWindowQuietJudgesThatWindowOnly(t *testing.T) {
+func TestModelWindowQuietDecidesThatWindowOnly(t *testing.T) {
 	b, out := startModel(t)
 	b.Publish(current(twoWindows()))
 	decisionsOf(t, out, 2)
@@ -503,7 +503,7 @@ func restartModel(t *testing.T, st *store.Store, day int) (*bus.Bus, *bus.Subscr
 	return b, out
 }
 
-// A window quiet binds by the evidence of every unclaimed window: a rival of
+// A settled window binds by the evidence of every unclaimed window: a rival of
 // the same app and title makes the binding ambiguous.
 func TestModelWindowQuietBindsAgainstRivals(t *testing.T) {
 	for _, c := range []struct {

@@ -1,6 +1,6 @@
 // Package store keeps the arrangement model in SQLite: windows and their
 // bindings, one arrangement per display set, system-versioned placements,
-// owed windows, the journal of changes and events, and the event stream.
+// dirty windows, the journal of changes and events, and the event stream.
 package store
 
 import (
@@ -337,10 +337,10 @@ func event(tx *sql.Tx, change, win int64, kind string) error {
 	return err
 }
 
-// OweAll marks owed, with no repair progress, every window on screen (its
+// OweAll marks dirty, with no put progress, every window on screen (its
 // id in this boot is among live) that has a placement in the arrangement. A
-// window that is gone is not owed: nothing could release it. It returns how
-// many windows are owed.
+// window that is gone is not marked: nothing could clean it. It returns how
+// many windows are dirty.
 func (s *Store) OweAll(arr int64, boot, at time.Time, cause string, live []uint32) (int, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -367,7 +367,7 @@ func (s *Store) OweAll(arr int64, boot, at time.Time, cause string, live []uint3
 			n++
 		}
 	}
-	if _, err := tx.Exec(`UPDATE change SET note = ? WHERE id = ?`, fmt.Sprintf("%d windows owed", n), change); err != nil {
+	if _, err := tx.Exec(`UPDATE change SET note = ? WHERE id = ?`, fmt.Sprintf("%d windows dirty", n), change); err != nil {
 		return 0, err
 	}
 	return n, tx.Commit()
@@ -426,8 +426,8 @@ type Bound struct {
 	Seen   arrangement.Seen
 }
 
-// Bind gives stored windows their fresh ids and owes each with a placement
-// in the arrangement its placement.
+// Bind gives stored windows their fresh ids and marks dirty each with a
+// placement in the arrangement.
 func (s *Store) Bind(arr int64, boot, at time.Time, cause string, bound []Bound) error {
 	if len(bound) == 0 {
 		return nil
@@ -559,7 +559,7 @@ func (s *Store) version(column string, change, win int64) (*arrangement.Placemen
 
 // Undo reverts the placements a change opened. A window whose placement from
 // that change is still current gets back the one the change closed, or none
-// if it had none, and is owed so the agent puts it there. A window whose
+// if it had none, and is dirty so the agent puts it there. A window whose
 // placement has changed again since is skipped. An undo that reverts nothing
 // writes nothing.
 func (s *Store) Undo(change int64, at time.Time) (reverted, skipped int, err error) {
