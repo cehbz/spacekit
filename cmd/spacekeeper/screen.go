@@ -17,14 +17,14 @@ import (
 // reader is the screen's view of the window server; liveReader is the real
 // one and tests script their own.
 type reader interface {
-	gather() (*snapshot, error)
+	readAll() (*snapshot, error)
 	window(wid uint32) (layout.LiveWindow, []uint64, error)
 	spaceList() ([]skylight.Display, error)
 }
 
 type liveReader struct{}
 
-func (liveReader) gather() (*snapshot, error)                             { return gather() }
+func (liveReader) readAll() (*snapshot, error)                            { return readAll() }
 func (liveReader) window(wid uint32) (layout.LiveWindow, []uint64, error) { return readWindow(wid) }
 func (liveReader) spaceList() ([]skylight.Display, error)                 { return skylight.ManagedDisplaySpaces() }
 
@@ -206,7 +206,7 @@ func (s *screen) publish(c WindowChanged) {
 func (s *screen) seed() {
 	var fresh *snapshot
 	var err error
-	s.onMain(func() { fresh, err = s.r.gather() })
+	s.onMain(func() { fresh, err = s.r.readAll() })
 	if err != nil {
 		log.Printf("screen (startup): read failed: %v", err)
 		return
@@ -228,7 +228,7 @@ func (s *screen) seed() {
 func (s *screen) validate(cause string) {
 	var fresh *snapshot
 	var err error
-	s.onMain(func() { fresh, err = s.r.gather() })
+	s.onMain(func() { fresh, err = s.r.readAll() })
 	if err != nil {
 		log.Printf("validate (%s): read failed: %v", cause, err)
 		return

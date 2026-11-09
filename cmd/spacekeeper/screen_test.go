@@ -15,22 +15,22 @@ import (
 
 // fakeReader answers reads from a scripted session.
 type fakeReader struct {
-	pic     *snapshot
-	windows map[uint32]layout.LiveWindow
-	spaces  map[uint32][]uint64
-	reads   []uint32
-	gathers int
-	// gatherErrs fails that many leading gathers.
-	gatherErrs int
-	windowErr  error             // window() fails with this, if set
-	display    *skylight.Display // nil: the two spaces of testPicture
+	pic       *snapshot
+	windows   map[uint32]layout.LiveWindow
+	spaces    map[uint32][]uint64
+	reads     []uint32
+	fullReads int
+	// fullReadErrs fails that many leading full reads.
+	fullReadErrs int
+	windowErr    error             // window() fails with this, if set
+	display      *skylight.Display // nil: the two spaces of testPicture
 }
 
-func (f *fakeReader) gather() (*snapshot, error) {
-	f.gathers++
-	if f.gatherErrs > 0 {
-		f.gatherErrs--
-		return nil, errors.New("gather failed")
+func (f *fakeReader) readAll() (*snapshot, error) {
+	f.fullReads++
+	if f.fullReadErrs > 0 {
+		f.fullReadErrs--
+		return nil, errors.New("read failed")
 	}
 	return f.pic.clone(), nil
 }
@@ -77,13 +77,13 @@ func startScreen(t *testing.T, r *fakeReader, types ...event.Event) (*bus.Bus, *
 	return b, sc, out
 }
 
-func TestScreenStartsFromGatherAndPublishesCopies(t *testing.T) {
+func TestScreenStartsFromTheSeedReadAndPublishesCopies(t *testing.T) {
 	r := &fakeReader{pic: testPicture()}
 	_, sc, out := startScreen(t, r, CurrentChanged{})
 	e := expectEvent(t, out, CurrentChanged{}, time.Second)
 	pic := e.(CurrentChanged).Current
-	if len(pic.windows) != 1 || r.gathers != 1 {
-		t.Fatalf("Current has %d windows after %d gathers", len(pic.windows), r.gathers)
+	if len(pic.windows) != 1 || r.fullReads != 1 {
+		t.Fatalf("Current has %d windows after %d full reads", len(pic.windows), r.fullReads)
 	}
 	pic.windows[0].Title = "mutated"
 	if sc.pic.windows[0].Title != "one" { // safe: the screen is idle after publishing
@@ -101,8 +101,8 @@ func TestScreenMoveReadsThatWindowOnly(t *testing.T) {
 	if c.Window != 1 || c.Frame.X != 50 || c.Space != 100 {
 		t.Fatalf("change = %+v", c)
 	}
-	if len(r.reads) != 1 || r.reads[0] != 1 || r.gathers != 1 {
-		t.Fatalf("reads %v, gathers %d; want one read of window 1 and the startup gather", r.reads, r.gathers)
+	if len(r.reads) != 1 || r.reads[0] != 1 || r.fullReads != 1 {
+		t.Fatalf("reads %v, full reads %d; want one read of window 1 and the seed read", r.reads, r.fullReads)
 	}
 }
 
@@ -214,7 +214,7 @@ func TestScreenUnlistedWindowLeavesAll(t *testing.T) {
 }
 
 func TestScreenRetriesStartupOnTick(t *testing.T) {
-	r := &fakeReader{pic: testPicture(), gatherErrs: 1}
+	r := &fakeReader{pic: testPicture(), fullReadErrs: 1}
 	b, _, out := startScreen(t, r, CurrentChanged{})
 	expectNone(t, out, 100*time.Millisecond)
 	b.Publish(Tick{Stamp: event.Now(), N: 1})

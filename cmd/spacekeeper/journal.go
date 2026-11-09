@@ -128,7 +128,7 @@ func undoCmd(arg string) error {
 // oweCmd marks every window of the current arrangement dirty; the running
 // agent puts them back at its next decide.
 func oweCmd() error {
-	s, err := gather()
+	s, err := readAll()
 	if err != nil {
 		return err
 	}

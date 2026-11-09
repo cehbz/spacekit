@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -191,7 +192,9 @@ func (s *snapshot) setSpaces(displays []skylight.Display) {
 	}
 }
 
-func gather() (*snapshot, error) {
+// readAll is the full read: every space, and every window with the space it
+// is on and its frame.
+func readAll() (*snapshot, error) {
 	displays, err := skylight.ManagedDisplaySpaces()
 	if err != nil {
 		return nil, err
@@ -254,24 +257,30 @@ func gather() (*snapshot, error) {
 		if title == "" {
 			title = axTitle(w.OwnerPID, w.Number)
 		}
+		frame := layout.Rect{X: w.Bounds.X, Y: w.Bounds.Y, W: w.Bounds.Width, H: w.Bounds.Height}
+		if x, y, bw, bh, err := skylight.WindowFrame(w.Number); err == nil {
+			frame = layout.Rect{X: x, Y: y, W: bw, H: bh}
+		} else {
+			boundsUnavailable(err)
+		}
 		s.windows = append(s.windows, layout.LiveWindow{
 			ID:        w.Number,
 			OwnerPID:  w.OwnerPID,
 			BundleID:  skylight.BundleIDForPID(w.OwnerPID),
 			OwnerName: w.OwnerName,
 			Title:     title,
-			Frame:     layout.Rect{X: w.Bounds.X, Y: w.Bounds.Y, W: w.Bounds.Width, H: w.Bounds.Height},
+			Frame:     frame,
 		})
 	}
 	return s, nil
 }
 
 // inspectCmd is a diagnostic: for each window, the space it is on, its
-// CGWindow bounds, and the frame its app reports through Accessibility.
+// window server frame, and the frame its app reports through Accessibility.
 // "MISMATCH" marks a window whose app disagrees with the window server
 // about where it is, the state a window can be left in after a display drop.
 func inspectCmd() error {
-	s, err := gather()
+	s, err := readAll()
 	if err != nil {
 		return err
 	}
@@ -374,7 +383,23 @@ func readWindow(wid uint32) (layout.LiveWindow, []uint64, error) {
 	if title == "" {
 		title = skylight.WindowTitlesForPID(w.OwnerPID)[wid]
 	}
+	frame := layout.Rect{X: w.Bounds.X, Y: w.Bounds.Y, W: w.Bounds.Width, H: w.Bounds.Height}
+	if x, y, bw, bh, err := skylight.WindowFrame(wid); err == nil {
+		frame = layout.Rect{X: x, Y: y, W: bw, H: bh}
+	} else {
+		boundsUnavailable(err)
+	}
 	return layout.LiveWindow{ID: wid, OwnerPID: w.OwnerPID, BundleID: skylight.BundleIDForPID(w.OwnerPID),
-		OwnerName: w.OwnerName, Title: title,
-		Frame: layout.Rect{X: w.Bounds.X, Y: w.Bounds.Y, W: w.Bounds.Width, H: w.Bounds.Height}}, ids, nil
+		OwnerName: w.OwnerName, Title: title, Frame: frame}, ids, nil
+}
+
+var boundsWarned bool
+
+// boundsUnavailable logs the first failure to read window bounds; the drawn
+// rect from the window list stands in, which a space slide can displace.
+func boundsUnavailable(err error) {
+	if !boundsWarned {
+		boundsWarned = true
+		log.Printf("window bounds unavailable, reading drawn rects: %v", err)
+	}
 }
