@@ -8,6 +8,7 @@ import (
 
 	"github.com/cehbz/spacekit/internal/arrangement"
 	"github.com/cehbz/spacekit/internal/layout"
+	"strings"
 )
 
 var (
@@ -863,5 +864,83 @@ func TestMigrationSplitsAppFromWindow(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	} else {
 		s2.Close()
+	}
+}
+
+// A window's history lists its decisions oldest first, each with its
+// change's cause, and the placement a change opened for it.
+func TestHistoryListsAWindowsDecisionsInOrder(t *testing.T) {
+	s := open(t)
+	arr := arrangementWith(t, s, "D1", "S1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	steps := []struct {
+		cause string
+		ds    []arrangement.Decision
+	}{
+		{"display settled", []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)},
+			{Kind: arrangement.Put, Window: r.Window, Seen: seen(42, "S1", half), Want: arrangement.Placement{Space: "S1", Frame: full}, Resize: true}}},
+		{"put ended", []arrangement.Decision{{Kind: arrangement.Clean, Window: r.Window, Seen: seen(42, "S1", full)}}},
+	}
+	for i, st := range steps {
+		if err := s.Apply(arr, boot, t0.Add(time.Duration(i+1)*time.Second), st.cause, st.ds); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.History(r.Window, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds, causes []string
+	for _, h := range got {
+		kinds = append(kinds, h.Kind)
+		causes = append(causes, h.Cause)
+	}
+	if strings.Join(kinds, " ") != "adopted dirty put clean" {
+		t.Fatalf("kinds = %v, want adopted dirty put clean", kinds)
+	}
+	if strings.Join(causes, " ") != "look display settled display settled put ended" {
+		t.Fatalf("causes = %v", causes)
+	}
+	if got[0].Opened == nil || got[0].Opened.Frame != full || got[1].Opened != nil {
+		t.Fatalf("the adopt opened the placement, the dirty mark opened none: %+v %+v", got[0].Opened, got[1].Opened)
+	}
+	if !got[1].At.After(got[0].At) || !got[3].At.After(got[2].At) {
+		t.Fatalf("history is oldest first: %v", got)
+	}
+	if last, err := s.History(r.Window, 2); err != nil || len(last) != 2 || last[0].Kind != "put" {
+		t.Fatalf("the last two: %+v %v", last, err)
+	}
+}
+
+// A window record carries its app, title, current targets with their dirty
+// marks, and the boots and ids it has been bound under.
+func TestWindowRecordCarriesTargetsAndBindings(t *testing.T) {
+	s := open(t)
+	arr := arrangementWith(t, s, "D1", "S1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	if err := s.Apply(arr, boot, t0, "display settled", []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
+		t.Fatal(err)
+	}
+	win, err := s.WindowByBinding(boot, 42)
+	if err != nil || win != r.Window {
+		t.Fatalf("WindowByBinding = %d, %v; want %d", win, err, r.Window)
+	}
+	if none, err := s.WindowByBinding(boot, 43); err != nil || none != 0 {
+		t.Fatalf("an unbound id yields 0: %d, %v", none, err)
+	}
+	rec, err := s.Window(r.Window)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.App != "Example" || rec.Bundle != "com.example" || rec.Title != "t" || len(rec.Targets) != 1 {
+		t.Fatalf("record %+v", rec)
+	}
+	tg := rec.Targets[0]
+	if tg.DisplaySet != "D1" || tg.Space != "S1" || tg.Frame != full || !tg.Dirty || tg.Since.IsZero() {
+		t.Fatalf("target %+v", tg)
+	}
+	bs, err := s.Bindings(r.Window)
+	if err != nil || len(bs) != 1 || bs[0].WID != 42 || !bs[0].Boot.Equal(boot) {
+		t.Fatalf("bindings %+v %v", bs, err)
 	}
 }

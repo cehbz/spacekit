@@ -33,8 +33,12 @@ func usage() {
 commands:
   watch     run resident: keep the arrangement and put dirty windows back
             (the launchd agent)
-  inspect   print every recorded window with its space, CGWindow bounds, and
-            the frame its app reports via Accessibility (needs Accessibility)
+  inspect [W]
+            list every window with its space, the window server's frame and
+            the frame its app reports via Accessibility (needs Accessibility);
+            with W, a window id or a word of an app name or title, one
+            window's record, bindings, and its decisions interleaved with the
+            raw window-server events behind them
   frames    sample drawn rects against window bounds; run while switching
             spaces
   log       list recent changes to the arrangement and display disturbances
@@ -53,6 +57,8 @@ flags (after the command):
   -v        log: one line per window under each change
   -events   log: the raw event stream instead of changes
   -since T  log -events: RFC3339 lower bound
+  -record   inspect W: W is a record id rather than a window-server id
+  -last N   inspect W: how many decisions to show (default 20)
   -space id place: also move the window to this space id
 `)
 	os.Exit(2)
@@ -69,6 +75,7 @@ func main() {
 	verbose := fs.Bool("v", false, "log: per-window lines")
 	events := fs.Bool("events", false, "log: the raw event stream instead of changes")
 	since := fs.String("since", "", "log -events: RFC3339 lower bound")
+	byRecord := fs.Bool("record", false, "inspect: the argument is a record id")
 	spaceID := fs.Uint64("space", 0, "place: also move the window to this space id")
 	framesFor := fs.Duration("for", 20*time.Second, "frames: how long to sample")
 	framesEvery := fs.Duration("every", 200*time.Millisecond, "frames: sampling interval")
@@ -77,7 +84,11 @@ func main() {
 	var err error
 	switch cmd {
 	case "inspect":
-		err = inspectCmd()
+		if fs.NArg() == 0 {
+			err = inspectCmd()
+		} else {
+			err = inspectWindow(fs.Arg(0), *byRecord, *last)
+		}
 	case "frames":
 		err = framesCmd(*framesFor, *framesEvery)
 	case "log":
@@ -306,23 +317,29 @@ func inspectCmd() error {
 		return err
 	}
 	for _, w := range s.windows {
-		space := s.idToKey[s.winSpace[w.ID]]
-		if d, ok := s.fsWindow[w.ID]; ok {
-			space = "fullscreen@" + shortUUID(d)
-		}
-		f := w.Frame
-		line := fmt.Sprintf("%-6d %-16.16s %-36.36s %-8.8s cg=%.0f,%.0f %.0fx%.0f", w.ID, w.OwnerName, w.Title, space, f.X, f.Y, f.W, f.H)
-		if x, y, aw, ah, ok := skylight.WindowAXFrame(w.OwnerPID, w.ID); ok {
-			line += fmt.Sprintf(" ax=%.0f,%.0f %.0fx%.0f", x, y, aw, ah)
-			if math.Abs(x-f.X) > 2 || math.Abs(y-f.Y) > 2 || math.Abs(aw-f.W) > 2 || math.Abs(ah-f.H) > 2 {
-				line += " MISMATCH"
-			}
-		} else {
-			line += " ax=-"
-		}
-		fmt.Println(line)
+		fmt.Println(inspectLine(s, w))
 	}
 	return nil
+}
+
+// inspectLine is one window of the listing: id, app, title, space, the
+// window server's frame and the app's AX frame, with MISMATCH when they differ.
+func inspectLine(s *snapshot, w layout.LiveWindow) string {
+	space := s.idToKey[s.winSpace[w.ID]]
+	if d, ok := s.fsWindow[w.ID]; ok {
+		space = "fullscreen@" + shortUUID(d)
+	}
+	f := w.Frame
+	line := fmt.Sprintf("%-6d %-16.16s %-36.36s %-8.8s ws=%.0f,%.0f %.0fx%.0f", w.ID, w.OwnerName, w.Title, space, f.X, f.Y, f.W, f.H)
+	if x, y, aw, ah, ok := skylight.WindowAXFrame(w.OwnerPID, w.ID); ok {
+		line += fmt.Sprintf(" ax=%.0f,%.0f %.0fx%.0f", x, y, aw, ah)
+		if math.Abs(x-f.X) > 2 || math.Abs(y-f.Y) > 2 || math.Abs(aw-f.W) > 2 || math.Abs(ah-f.H) > 2 {
+			line += " MISMATCH"
+		}
+	} else {
+		line += " ax=-"
+	}
+	return line
 }
 
 // window returns the window as the snapshot holds it, and whether it does.

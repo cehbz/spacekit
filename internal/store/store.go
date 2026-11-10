@@ -782,3 +782,138 @@ func (s *Store) PruneStream(cutoff time.Time) (int, error) {
 	n, _ := res.RowsAffected()
 	return int(n), nil
 }
+
+// Target is a window's current placement in one arrangement.
+type Target struct {
+	Arrangement int64
+	DisplaySet  string
+	arrangement.Placement
+	Since    time.Time // when the placement was opened
+	Change   int64     // the change that opened it
+	Dirty    bool
+	Progress arrangement.Progress
+}
+
+// WindowRecord is one window as the store knows it.
+type WindowRecord struct {
+	Window             int64
+	App, Bundle, Title string
+	FirstSeen          time.Time
+	Targets            []Target
+}
+
+// Binding is one boot's window-server id for a window.
+type Binding struct {
+	Boot time.Time
+	WID  uint32
+}
+
+// Step is one decision about a window: its change's time and cause, the
+// event kind, and the placement the change opened for the window, if any.
+type Step struct {
+	At     time.Time
+	Change int64
+	Cause  string
+	Kind   string
+	Opened *arrangement.Placement
+}
+
+// WindowByBinding is the window bound to wid in boot, 0 when none.
+func (s *Store) WindowByBinding(boot time.Time, wid uint32) (int64, error) {
+	var win int64
+	err := s.db.QueryRow(`SELECT window_id FROM binding WHERE boot = ? AND wid = ?`, boot.Unix(), wid).Scan(&win)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	return win, err
+}
+
+// Window is a window's record with its current targets, one per arrangement.
+func (s *Store) Window(win int64) (WindowRecord, error) {
+	var r WindowRecord
+	var first int64
+	err := s.db.QueryRow(`SELECT w.id, a.name, a.bundle, w.title, w.first_seen FROM window w JOIN app a ON a.id = w.app_id WHERE w.id = ?`, win).
+		Scan(&r.Window, &r.App, &r.Bundle, &r.Title, &first)
+	if err == sql.ErrNoRows {
+		return r, fmt.Errorf("no window %d", win)
+	}
+	if err != nil {
+		return r, err
+	}
+	r.FirstSeen = time.UnixMilli(first)
+	rows, err := s.db.Query(`
+		SELECT p.arrangement_id, ar.display_set, p.space, p.x, p.y, p.w, p.h, c.at, c.id, o.progress
+		FROM placement p JOIN arrangement ar ON ar.id = p.arrangement_id JOIN change c ON c.id = p.opened_by
+		LEFT JOIN owed o ON o.window_id = p.window_id AND o.arrangement_id = p.arrangement_id
+		WHERE p.window_id = ? AND p.closed_by IS NULL ORDER BY p.arrangement_id`, win)
+	if err != nil {
+		return r, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var t Target
+		var at int64
+		var progress sql.NullInt64
+		if err := rows.Scan(&t.Arrangement, &t.DisplaySet, &t.Space, &t.Frame.X, &t.Frame.Y, &t.Frame.W, &t.Frame.H, &at, &t.Change, &progress); err != nil {
+			return r, err
+		}
+		t.Since = time.UnixMilli(at)
+		if progress.Valid {
+			t.Dirty, t.Progress = true, arrangement.Progress(progress.Int64)
+		}
+		r.Targets = append(r.Targets, t)
+	}
+	return r, rows.Err()
+}
+
+// Bindings lists the boots and window-server ids a window has carried, oldest first.
+func (s *Store) Bindings(win int64) ([]Binding, error) {
+	rows, err := s.db.Query(`SELECT boot, wid FROM binding WHERE window_id = ? ORDER BY boot, rowid`, win)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Binding
+	for rows.Next() {
+		var b Binding
+		var boot int64
+		if err := rows.Scan(&boot, &b.WID); err != nil {
+			return nil, err
+		}
+		b.Boot = time.Unix(boot, 0)
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// History lists the last decisions about a window, oldest first.
+func (s *Store) History(win int64, last int) ([]Step, error) {
+	rows, err := s.db.Query(`
+		SELECT c.id, c.at, c.cause, e.kind, p.space, p.x, p.y, p.w, p.h
+		FROM event e JOIN change c ON c.id = e.change_id
+		LEFT JOIN placement p ON p.window_id = e.window_id AND p.opened_by = c.id
+		WHERE e.window_id = ? ORDER BY e.id DESC LIMIT ?`, win, last)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Step
+	for rows.Next() {
+		var st Step
+		var at int64
+		var space sql.NullString
+		var x, y, w, h sql.NullFloat64
+		if err := rows.Scan(&st.Change, &at, &st.Cause, &st.Kind, &space, &x, &y, &w, &h); err != nil {
+			return nil, err
+		}
+		st.At = time.UnixMilli(at)
+		if space.Valid {
+			st.Opened = &arrangement.Placement{Space: space.String, Frame: layout.Rect{X: x.Float64, Y: y.Float64, W: w.Float64, H: h.Float64}}
+		}
+		out = append(out, st)
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, rows.Err()
+}

@@ -92,7 +92,8 @@ Keeps each window on its space and at its frame, and puts it back after a reboot
 go build -o spacekeeper ./cmd/spacekeeper
 
 spacekeeper watch             run resident (the launchd agent): keep the arrangement and put windows back
-spacekeeper inspect           each window with its space, the window server's frame, and the frame its app reports via Accessibility
+spacekeeper inspect [W]       each window with its space, the window server's frame, and the frame its app reports via Accessibility;
+                              with W (a window id or a word of an app name or title) one window's record, bindings and history
 spacekeeper log [-last N] [-v]  recent changes to the arrangement and display changes; -v lists each window
 spacekeeper undo N            revert change N from the log; the agent puts the windows back within a minute
 spacekeeper owe               mark every window on screen dirty; the agent puts each back at its recorded placement within a minute
