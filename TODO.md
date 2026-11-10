@@ -13,7 +13,6 @@
 - An app's display name is written once, when its row is created, and never updated. Refresh it on each look (or on `Prune`) so a renamed app reads right in `log` and `inspect`.
 - The latest-binding lookup in `Stored` (`MAX(rowid) ... WHERE window_id = ?`) has no index on `binding(window_id)`; fine at 300 windows, add the index if `Stored` shows up in a profile.
 - The migration runner should run `PRAGMA foreign_key_check` before `COMMIT` and roll back on a violation, so a bad rebuild can't commit.
-- `TestModelLaptopBootBindsDualOnlyRecordAndDualReturnPutsItBack` starts the second boot without waiting for the first model to finish, and drops the error from `Recorded`. Await the first model and check the error.
 - When a decide held through a lock or sleep is released, its log line names only the last held cause (`window settled (held)`) even when it also carries a display settle or a put's windows.
 - `readOne` and the validator's `put` in screen.go keep Current the same way with two copies of the code; fold them once one has to change.
 - Validation has no test for the tolerance path (two reads within 3 points but not equal), for a space-only difference adopted twice, or for `knownSpace`'s fullscreen exception. A window listed but never placeable never enters the live list `all`, which only matters to binding evidence.
