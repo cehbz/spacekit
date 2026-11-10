@@ -44,7 +44,7 @@ func sampleFrames() ([]sample, error) {
 	}
 	var out []sample
 	for _, w := range wins {
-		if !placeableWindow(w) {
+		if !placeableWindow(w, parentOf(w.Number), skylight.BundleIDForPID(w.OwnerPID)) {
 			continue
 		}
 		s := sample{wid: w.Number, app: w.OwnerName, list: layout.Rect{X: w.Bounds.X, Y: w.Bounds.Y, W: w.Bounds.Width, H: w.Bounds.Height}}

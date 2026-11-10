@@ -114,6 +114,44 @@ static int sk_window_bounds(uint32_t wid, double *x, double *y, double *w, doubl
 	return 0;
 }
 
+typedef CFTypeRef (*sk_query_fn)(int, CFArrayRef, int);
+typedef CFTypeRef (*sk_copy_fn)(CFTypeRef);
+typedef int (*sk_count_fn)(CFTypeRef);
+typedef bool (*sk_adv_fn)(CFTypeRef);
+typedef uint32_t (*sk_u32_fn)(CFTypeRef);
+// sk_window_parent writes the window server's parent id for wid (0 when the
+// window is attached to nothing). Returns -1 when the symbols are missing,
+// -2 when the query answers for a different count of windows.
+static int sk_window_parent(uint32_t wid, uint32_t *parent) {
+	static sk_query_fn query; static sk_copy_fn copy; static sk_count_fn count; static sk_adv_fn adv; static sk_u32_fn getparent;
+	if (!query) {
+		query = (sk_query_fn)sk_sym("SLSWindowQueryWindows", "CGSWindowQueryWindows");
+		copy = (sk_copy_fn)sk_sym("SLSWindowQueryResultCopyWindows", "CGSWindowQueryResultCopyWindows");
+		count = (sk_count_fn)sk_sym("SLSWindowIteratorGetCount", "CGSWindowIteratorGetCount");
+		adv = (sk_adv_fn)sk_sym("SLSWindowIteratorAdvance", "CGSWindowIteratorAdvance");
+		getparent = (sk_u32_fn)sk_sym("SLSWindowIteratorGetParentID", "CGSWindowIteratorGetParentID");
+	}
+	if (!query || !copy || !count || !adv || !getparent) return -1;
+	CFNumberRef n = CFNumberCreate(NULL, kCFNumberSInt32Type, &wid);
+	CFArrayRef arr = CFArrayCreate(NULL, (const void **)&n, 1, &kCFTypeArrayCallBacks);
+	int rc = -2;
+	CFTypeRef q = query(sk_cid(), arr, 1);
+	if (q) {
+		CFTypeRef it = copy(q);
+		if (it) {
+			if (count(it) == 1 && adv(it)) {
+				*parent = getparent(it);
+				rc = 0;
+			}
+			CFRelease(it);
+		}
+		CFRelease(q);
+	}
+	CFRelease(arr);
+	CFRelease(n);
+	return rc;
+}
+
 static CFDataRef sk_window_list(void) {
 	CFArrayRef arr = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID);
 	if (!arr) return NULL;
@@ -360,6 +398,19 @@ func WindowAXFrame(pid int, wid uint32) (x, y, w, h float64, ok bool) {
 	var cx, cy, cw, ch C.double
 	rc := C.sk_window_ax_frame(C.int(pid), C.uint32_t(wid), &cx, &cy, &cw, &ch)
 	return float64(cx), float64(cy), float64(cw), float64(ch), rc == 0
+}
+
+// WindowParent is the window the window server has wid attached to (a sheet's
+// or panel's host window), 0 when it is attached to nothing. Main thread only.
+func WindowParent(wid uint32) (uint32, error) {
+	var parent C.uint32_t
+	switch rc := C.sk_window_parent(C.uint32_t(wid), &parent); {
+	case rc == -1:
+		return 0, errors.New("SLSWindowQueryWindows unavailable")
+	case rc != 0:
+		return 0, fmt.Errorf("SLSWindowQueryWindows: no answer for window %d", wid)
+	}
+	return uint32(parent), nil
 }
 
 // MoveWindowsToSpace moves windows to a space via

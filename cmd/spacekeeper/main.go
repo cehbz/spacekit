@@ -157,12 +157,32 @@ type snapshot struct {
 	fsWindow map[uint32]string
 }
 
-// placeableWindow is the window-list test for a window the agent places:
-// an ordinary visible window of usable size. Membership of one user space
+// windowManagerBundle is the system process whose windows (the Mission
+// Control highlight overlay, tiling handles) are never an app's.
+const windowManagerBundle = "com.apple.WindowManager"
+
+// placeableWindow is the window-list test for a window the agent places: an
+// ordinary visible window of usable size, attached to no parent (a sheet,
+// save panel or bubble goes where its parent goes, and a move of it moves
+// the parent) and not the window manager's own. Membership of one user space
 // is checked separately, since it needs the space list.
-func placeableWindow(w skylight.WindowInfo) bool {
-	return w.Layer == 0 && w.Alpha != 0 && w.Bounds.Width >= 50 && w.Bounds.Height >= 50
+func placeableWindow(w skylight.WindowInfo, parent uint32, bundle string) bool {
+	return w.Layer == 0 && w.Alpha != 0 && w.Bounds.Width >= 50 && w.Bounds.Height >= 50 &&
+		parent == 0 && bundle != windowManagerBundle
 }
+
+// parentOf is the window's parent id; a failed query reads as no parent,
+// logged once, so the agent still places windows when the symbol is gone.
+func parentOf(wid uint32) uint32 {
+	parent, err := skylight.WindowParent(wid)
+	if err != nil && !parentWarned {
+		parentWarned = true
+		log.Printf("window parent unavailable, treating windows as unattached: %v", err)
+	}
+	return parent
+}
+
+var parentWarned bool
 
 // setSpaces rebuilds the space-list fields from the window server's display
 // list; the window fields are left alone.
@@ -226,7 +246,8 @@ func readAll() (*snapshot, error) {
 	}
 	for _, w := range wins {
 		s.all = append(s.all, layout.ListedWindow{ID: w.Number, OwnerName: w.OwnerName, Title: w.Name})
-		if !placeableWindow(w) {
+		bundle := skylight.BundleIDForPID(w.OwnerPID)
+		if !placeableWindow(w, parentOf(w.Number), bundle) {
 			continue
 		}
 		ids, err := skylight.SpacesForWindow(w.Number)
@@ -266,7 +287,7 @@ func readAll() (*snapshot, error) {
 		s.windows = append(s.windows, layout.LiveWindow{
 			ID:        w.Number,
 			OwnerPID:  w.OwnerPID,
-			BundleID:  skylight.BundleIDForPID(w.OwnerPID),
+			BundleID:  bundle,
 			OwnerName: w.OwnerName,
 			Title:     title,
 			Frame:     frame,
@@ -372,7 +393,8 @@ func readWindow(wid uint32) (layout.LiveWindow, []uint64, error) {
 	if err != nil {
 		return layout.LiveWindow{}, nil, err
 	}
-	if !placeableWindow(w) {
+	bundle := skylight.BundleIDForPID(w.OwnerPID)
+	if !placeableWindow(w, parentOf(wid), bundle) {
 		return layout.LiveWindow{}, nil, errNotPlaceable
 	}
 	ids, err := skylight.SpacesForWindow(wid)
@@ -389,7 +411,7 @@ func readWindow(wid uint32) (layout.LiveWindow, []uint64, error) {
 	} else {
 		boundsUnavailable(err)
 	}
-	return layout.LiveWindow{ID: wid, OwnerPID: w.OwnerPID, BundleID: skylight.BundleIDForPID(w.OwnerPID),
+	return layout.LiveWindow{ID: wid, OwnerPID: w.OwnerPID, BundleID: bundle,
 		OwnerName: w.OwnerName, Title: title, Frame: frame}, ids, nil
 }
 
