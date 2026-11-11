@@ -404,9 +404,13 @@ func (s *snapshot) clone() *snapshot {
 var errNotPlaceable = errors.New("window not placeable")
 
 // readWindow lists one window with its title and spaces. Main thread only.
-// A window that is not placeable reads as errNotPlaceable.
+// A window that is not placeable reads as errNotPlaceable; one the list
+// omits reads as readUnlisted does.
 func readWindow(wid uint32) (layout.LiveWindow, []uint64, error) {
 	w, err := skylight.WindowInfoFor(wid)
+	if errors.Is(err, skylight.ErrNotListed) {
+		return readUnlisted(wid)
+	}
 	if err != nil {
 		return layout.LiveWindow{}, nil, err
 	}
@@ -430,6 +434,18 @@ func readWindow(wid uint32) (layout.LiveWindow, []uint64, error) {
 	}
 	return layout.LiveWindow{ID: wid, OwnerPID: w.OwnerPID, BundleID: bundle,
 		OwnerName: w.OwnerName, Title: title, Frame: frame}, ids, nil
+}
+
+// readUnlisted reads what the window server still answers for a window its
+// list omits, as it does for up to 200 ms after an attach: ErrNotListed with
+// the window's spaces and, when the bounds read succeeds, its ID and frame.
+func readUnlisted(wid uint32) (layout.LiveWindow, []uint64, error) {
+	ids, _ := skylight.SpacesForWindow(wid) // none: a window on no space
+	var w layout.LiveWindow
+	if x, y, bw, bh, err := skylight.WindowFrame(wid); err == nil {
+		w = layout.LiveWindow{ID: wid, Frame: layout.Rect{X: x, Y: y, W: bw, H: bh}}
+	}
+	return w, ids, skylight.ErrNotListed
 }
 
 var boundsWarned bool

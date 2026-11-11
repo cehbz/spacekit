@@ -89,22 +89,34 @@ func (s *screen) handle(e event.Event) {
 	case event.WindowResized:
 		s.readOne(e.Window)
 	case event.WindowDetached:
-		if s.pic.winSpace[e.Window] == e.Space {
-			s.remove(e.Window, true)
+		sp, placed := s.pic.winSpace[e.Window]
+		d, fs := s.pic.fsWindow[e.Window]
+		if (placed && sp == e.Space) || (fs && s.pic.fsSpace[e.Space] == d) {
+			s.transit(e.Window)
 		}
 	case event.WindowDestroyed:
 		s.remove(e.Window, false)
 	}
 }
 
-// readOne lists one window and places it in Current; one the server no
-// longer lists, or that is not placeable, is removed.
+// readOne reads one window and places it in Current. The window list omits a
+// window for up to 200 ms after an attach, so a held window it omits keeps
+// its listing and takes the read's space and frame; one Current does not hold
+// is not placed and leaves all. A held window read on no known space is in
+// transit. A window that is not placeable is removed.
 func (s *screen) readOne(wid uint32) {
 	var w layout.LiveWindow
 	var spaces []uint64
 	var err error
 	s.onMain(func() { w, spaces, err = s.r.window(wid) })
-	if err != nil {
+	held, isHeld := s.pic.window(wid)
+	switch {
+	case errors.Is(err, skylight.ErrNotListed) && isHeld:
+		if w.ID == wid { // the bounds read
+			held.Frame = w.Frame
+		}
+		w = held
+	case err != nil:
 		s.remove(wid, !errors.Is(err, skylight.ErrNotListed))
 		return
 	}
@@ -124,6 +136,9 @@ func (s *screen) readOne(wid uint32) {
 	case len(user) == 0 && fsDisplay != "":
 		delete(s.pic.winSpace, wid)
 		s.pic.fsWindow[wid] = fsDisplay
+	case len(user) == 0 && isHeld:
+		s.transit(wid)
+		return
 	default:
 		s.remove(wid, true)
 		return
@@ -149,13 +164,28 @@ func (s *screen) readOne(wid uint32) {
 	s.publish(WindowChanged{Stamp: event.Now(), Window: wid, Space: s.pic.winSpace[wid], Frame: w.Frame})
 }
 
-// remove drops a window from Current. A window the window server still
-// lists stays in all, the whole window list; one it no longer lists leaves
-// all even if Current never held it.
-func (s *screen) remove(wid uint32, listed bool) {
-	_, known := s.pic.winSpace[wid]
+// transit takes a held window off its space between a detach and the attach
+// that follows: it stays in Current, on no space, so no decide sees it. A
+// window already in transit is left as it is.
+func (s *screen) transit(wid uint32) {
+	_, placed := s.pic.winSpace[wid]
 	_, fs := s.pic.fsWindow[wid]
-	inCurrent := known || fs
+	if !placed && !fs {
+		return
+	}
+	delete(s.pic.winSpace, wid)
+	delete(s.pic.fsWindow, wid)
+	w, _ := s.pic.window(wid)
+	s.publish(WindowChanged{Stamp: event.Now(), Window: wid, Frame: w.Frame})
+}
+
+// remove drops a window from Current: on a destroy, on a read that finds it
+// not placeable, and when two validations read it gone. A read that finds a
+// held window unlisted does not remove it: the list omits a window around an
+// attach. A window the window server still lists stays in all, the whole
+// window list; one it no longer lists leaves all even if Current never held it.
+func (s *screen) remove(wid uint32, listed bool) {
+	_, inCurrent := s.pic.window(wid)
 	if !listed {
 		for i := range s.pic.all {
 			if s.pic.all[i].ID == wid {

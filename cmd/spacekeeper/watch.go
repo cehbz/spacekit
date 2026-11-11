@@ -68,11 +68,11 @@ func displaySet(spaces []layout.SavedSpace) string {
 }
 
 // seenWindows are the snapshot's windows on user desktops; fullscreen
-// windows are not placed.
+// windows and windows in transit between spaces are not placed.
 func seenWindows(s *snapshot) []arrangement.Seen {
 	out := make([]arrangement.Seen, 0, len(s.windows))
 	for _, l := range s.windows {
-		if _, fs := s.fsWindow[l.ID]; fs {
+		if _, placed := s.winSpace[l.ID]; !placed {
 			continue
 		}
 		out = append(out, arrangement.Seen{

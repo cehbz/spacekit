@@ -24,6 +24,9 @@ type fakeReader struct {
 	fullReadErrs int
 	windowErr    error             // window() fails with this, if set
 	display      *skylight.Display // nil: the two spaces of testPicture
+	// unlisted windows are omitted from the window list while their frame
+	// and spaces still read, as around an attach.
+	unlisted map[uint32]bool
 }
 
 func (f *fakeReader) readAll() (*snapshot, error) {
@@ -45,6 +48,9 @@ func (f *fakeReader) window(wid uint32) (layout.LiveWindow, []uint64, error) {
 	f.reads = append(f.reads, wid)
 	if f.windowErr != nil {
 		return layout.LiveWindow{}, nil, f.windowErr
+	}
+	if f.unlisted[wid] {
+		return layout.LiveWindow{ID: wid, Frame: f.windows[wid].Frame}, f.spaces[wid], skylight.ErrNotListed
 	}
 	w, ok := f.windows[wid]
 	if !ok {
@@ -203,13 +209,132 @@ func TestScreenDestroyPrunesListedOnly(t *testing.T) {
 	}
 }
 
+// A window Current does not hold leaves all when a read finds it unlisted.
 func TestScreenUnlistedWindowLeavesAll(t *testing.T) {
 	r := &fakeReader{pic: testPicture()} // no windows scripted: ErrNotListed
+	r.pic.all = append(r.pic.all, layout.ListedWindow{ID: 7, OwnerName: "Tiny"})
+	b, _, out := startScreen(t, r, WindowChanged{}, CurrentChanged{})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	b.Publish(event.WindowMoved{Stamp: event.Now(), Window: 7})
+	expectNone(t, out, 150*time.Millisecond)
+	b.Publish(event.SpaceSwitched{Stamp: event.Now()}) // a synchronisation point: Current is published
+	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
+	if len(pic.windows) != 1 || len(pic.all) != 1 || pic.lists(7) {
+		t.Fatalf("windows %d, all %+v; want window 1 only", len(pic.windows), pic.all)
+	}
+}
+
+// The window list omits a window for up to 200 ms after it attaches; a held
+// window keeps its listing and takes the attach's space and frame.
+func TestScreenUnlistedAttachKeepsAHeldWindow(t *testing.T) {
+	r := &fakeReader{pic: testPicture(), windows: map[uint32]layout.LiveWindow{
+		1: {ID: 1, Frame: layout.Rect{X: 500, Y: 0, W: 100, H: 100}},
+	}, spaces: map[uint32][]uint64{1: {200}}, unlisted: map[uint32]bool{1: true}}
 	b, sc, out := startScreen(t, r, WindowChanged{})
-	b.Publish(event.WindowMoved{Stamp: event.Now(), Window: 1})
+	b.Publish(event.WindowAttached{Stamp: event.Now(), Window: 1, Space: 200})
+	c := expectEvent(t, out, WindowChanged{}, time.Second).(WindowChanged)
+	if c.Gone || c.Window != 1 || c.Space != 200 || c.Frame.X != 500 {
+		t.Fatalf("change = %+v, want window 1 on 200 at x=500", c)
+	}
+	w, held := sc.pic.window(1) // safe: the screen is idle after publishing
+	if !held || w.Title != "one" || w.Frame.X != 500 || sc.pic.winSpace[1] != 200 || !sc.pic.lists(1) {
+		t.Fatalf("Current window 1 = %+v held %v on %d; want it held on 200 at x=500, titled one", w, held, sc.pic.winSpace[1])
+	}
+}
+
+// A detach leaves the window in transit: held, on no space, and decided by
+// nothing.
+func TestScreenDetachPutsAWindowInTransit(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, sc, out := startScreen(t, r, CurrentChanged{})
+	expectEvent(t, out, CurrentChanged{}, time.Second) // startup
+	b.Publish(event.WindowDetached{Stamp: event.Now(), Window: 1, Space: 100})
+	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
+	_, held := pic.window(1)
+	_, placed := pic.winSpace[1]
+	_, fs := pic.fsWindow[1]
+	if !held || placed || fs || !pic.lists(1) || len(seenWindows(pic)) != 0 {
+		t.Fatalf("after detach: held %v, placed %v, fullscreen %v, seen %d; want held in transit, seen by nothing",
+			held, placed, fs, len(seenWindows(pic)))
+	}
+	if _, held := sc.pic.window(1); !held { // safe: the screen is idle after publishing
+		t.Fatal("window 1 dropped from Current")
+	}
+}
+
+// A fullscreen window detaches from its display's fullscreen space.
+func TestScreenFullscreenDetachPutsAWindowInTransit(t *testing.T) {
+	p := testPicture()
+	p.fsSpace[300] = "D1"
+	p.fsWindow[3] = "D1"
+	p.windows = append(p.windows, layout.LiveWindow{ID: 3, OwnerPID: 12, OwnerName: "C", Title: "three", Frame: layout.Rect{W: 1440, H: 900}})
+	p.all = append(p.all, layout.ListedWindow{ID: 3, OwnerName: "C", Title: "three"})
+	r := &fakeReader{pic: p}
+	b, _, out := startScreen(t, r, CurrentChanged{})
+	expectEvent(t, out, CurrentChanged{}, time.Second) // startup
+	b.Publish(event.WindowDetached{Stamp: event.Now(), Window: 3, Space: 300})
+	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
+	_, held := pic.window(3)
+	_, fs := pic.fsWindow[3]
+	if !held || fs {
+		t.Fatalf("after detach: held %v, fullscreen %v; want held in transit", held, fs)
+	}
+}
+
+// A read in transit finds the window on no space: nothing changes.
+func TestScreenReadInTransitChangesNothing(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, _, out := startScreen(t, r, CurrentChanged{}, WindowChanged{})
+	expectEvent(t, out, CurrentChanged{}, time.Second) // startup
+	b.Publish(event.WindowDetached{Stamp: event.Now(), Window: 1, Space: 100})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
 	expectEvent(t, out, WindowChanged{}, time.Second)
-	if len(sc.pic.windows) != 0 || len(sc.pic.all) != 0 {
-		t.Fatalf("windows %d, all %d; want 0 and 0", len(sc.pic.windows), len(sc.pic.all))
+	b.Publish(event.WindowResized{Stamp: event.Now(), Window: 1}) // no window scripted: unlisted, on no space
+	expectNone(t, out, 150*time.Millisecond)
+	b.Publish(event.SpaceSwitched{Stamp: event.Now()}) // a synchronisation point: Current is published
+	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
+	_, held := pic.window(1)
+	_, placed := pic.winSpace[1]
+	if !held || placed || !pic.lists(1) {
+		t.Fatalf("after a read in transit: held %v, placed %v, listed %v; want held in transit", held, placed, pic.lists(1))
+	}
+}
+
+// A window Current never held is not placed from an attach the list omits.
+func TestScreenUnlistedAttachOfANewWindowPlacesNothing(t *testing.T) {
+	r := &fakeReader{pic: testPicture(), windows: map[uint32]layout.LiveWindow{
+		2: {ID: 2, Frame: layout.Rect{X: 1, Y: 1, W: 300, H: 300}},
+	}, spaces: map[uint32][]uint64{2: {200}}, unlisted: map[uint32]bool{2: true}}
+	b, _, out := startScreen(t, r, WindowChanged{}, CurrentChanged{})
+	expectEvent(t, out, CurrentChanged{}, time.Second) // startup
+	b.Publish(event.WindowAttached{Stamp: event.Now(), Window: 2, Space: 200})
+	expectNone(t, out, 150*time.Millisecond)
+	b.Publish(event.SpaceSwitched{Stamp: event.Now()}) // a synchronisation point: Current is published
+	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
+	if _, held := pic.window(2); held || len(pic.windows) != 1 {
+		t.Fatalf("Current has %d windows, want window 2 left out", len(pic.windows))
+	}
+}
+
+// The attach that ends a transit places the window, unlisted or not.
+func TestScreenAttachAfterTransitPlacesTheWindow(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, sc, out := startScreen(t, r, CurrentChanged{}, WindowChanged{})
+	expectEvent(t, out, CurrentChanged{}, time.Second) // startup
+	b.Publish(event.WindowDetached{Stamp: event.Now(), Window: 1, Space: 100})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	expectEvent(t, out, WindowChanged{}, time.Second)
+	r.windows = map[uint32]layout.LiveWindow{1: {ID: 1, Frame: layout.Rect{X: 500, Y: 0, W: 100, H: 100}}}
+	r.spaces = map[uint32][]uint64{1: {200}}
+	r.unlisted = map[uint32]bool{1: true}
+	b.Publish(event.WindowAttached{Stamp: event.Now(), Window: 1, Space: 200})
+	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
+	c := expectEvent(t, out, WindowChanged{}, time.Second).(WindowChanged)
+	if c.Gone || c.Window != 1 || c.Space != 200 || c.Frame.X != 500 {
+		t.Fatalf("change = %+v, want window 1 on 200 at x=500", c)
+	}
+	if pic.winSpace[1] != 200 || len(seenWindows(pic)) != 1 || sc.pic.winSpace[1] != 200 {
+		t.Fatalf("Current after attach: winSpace %v, seen %d; want window 1 on 200 and seen", pic.winSpace, len(seenWindows(pic)))
 	}
 }
 
