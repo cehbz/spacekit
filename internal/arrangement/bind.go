@@ -27,7 +27,7 @@ const (
 // window is a candidate for a fresh one of the same app unless its binding in
 // this boot is live. A pair is made only when the evidence is
 // unambiguous at its strength: one candidate for the fresh window, and one
-// fresh window for that candidate. Candidates tied at a strength are narrowed
+// fresh window for that candidate. Candidates tied on title and frame are narrowed
 // to those bound in the latest boot. Stronger evidence is settled first. The
 // result maps a fresh window's id to the stored window.
 func Bind(fresh []Seen, stored []Stored, boot int64, live map[uint32]bool) map[uint32]int64 {
@@ -62,9 +62,9 @@ func Bind(fresh []Seen, stored []Stored, boot int64, live map[uint32]bool) map[u
 }
 
 // latest returns the one untaken candidate for f at level, or nil. Candidates
-// are narrowed to those bound in the latest boot: twins left by earlier failed
-// binds share title and frame, and the latest is the window. Twins of the same
-// boot stay ambiguous.
+// matching on title and frame are narrowed to those bound in the latest boot:
+// twins left by earlier failed binds share both, and the latest is the window.
+// Twins of the same boot, and ties on title or frame alone, stay ambiguous.
 func latest(f Seen, stored []Stored, taken map[int64]bool, level int, boot int64, live map[uint32]bool) *Stored {
 	var match *Stored
 	n := 0
@@ -74,7 +74,11 @@ func latest(f Seen, stored []Stored, taken map[int64]bool, level int, boot int64
 			continue
 		}
 		switch {
-		case match == nil || o.Boot > match.Boot:
+		case match == nil:
+			match, n = o, 1
+		case level != titleAndFrame:
+			n++
+		case o.Boot > match.Boot:
 			match, n = o, 1
 		case o.Boot == match.Boot:
 			n++

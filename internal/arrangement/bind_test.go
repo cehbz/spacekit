@@ -203,3 +203,20 @@ func TestBindCountRuleKeepsOtherText(t *testing.T) {
 		}
 	}
 }
+
+func TestBindLaterBootBreaksOnlyFullTies(t *testing.T) {
+	// Two dead records from different boots that share only a title, or only
+	// a frame, are two windows, not twins: the later boot decides nothing.
+	later := left(1, "New Tab", "S2", full)
+	later.Boot = thisBoot - 86400
+	earlier := left(2, "New Tab", "S3", rightHalf)
+	earlier.Boot = thisBoot - 2*86400
+	if got := Bind([]Seen{fresh(900, "New Tab", odd)}, []Stored{later, earlier}, thisBoot, map[uint32]bool{900: true}); len(got) != 0 {
+		t.Fatalf("title only: got %v, want nothing", got)
+	}
+	earlier.Title = "Review"
+	earlier.Frame = full
+	if got := Bind([]Seen{fresh(900, "Settings", full)}, []Stored{later, earlier}, thisBoot, map[uint32]bool{900: true}); len(got) != 0 {
+		t.Fatalf("frame only: got %v, want nothing", got)
+	}
+}
