@@ -156,3 +156,50 @@ func TestBindEachStoredWindowOnce(t *testing.T) {
 		t.Fatalf("title and frame beats frame alone: got %v, want only 900->1", got)
 	}
 }
+
+func TestBindTwinsToTheLaterBoot(t *testing.T) {
+	// Twins left by earlier failed binds: same title, same frame. The one
+	// bound more recently is the window.
+	later := left(1, "PocketSmith", "S2", odd)
+	later.Boot = thisBoot - 86400
+	earlier := left(2, "PocketSmith", "S3", odd)
+	earlier.Boot = thisBoot - 2*86400
+	got := Bind([]Seen{fresh(900, "PocketSmith", odd)}, []Stored{later, earlier}, thisBoot, map[uint32]bool{900: true})
+	if len(got) != 1 || got[900] != 1 {
+		t.Fatalf("got %v, want 900->1: the twin bound in the later boot", got)
+	}
+}
+
+func TestBindTitleIgnoresCountPrefix(t *testing.T) {
+	got := Bind([]Seen{fresh(900, "(3) Facebook", full)}, []Stored{left(1, "(1) Facebook", "S2", odd)}, thisBoot, map[uint32]bool{900: true})
+	if got[900] != 1 {
+		t.Fatalf("got %v, want 900->1: titles differ only in the unread count", got)
+	}
+}
+
+func TestBindTitleIgnoresInfixedCount(t *testing.T) {
+	got := Bind([]Seen{fresh(900, "Inbox (34) - x", full)}, []Stored{left(1, "Inbox (2) - x", "S2", odd)}, thisBoot, map[uint32]bool{900: true})
+	if got[900] != 1 {
+		t.Fatalf("got %v, want 900->1: titles differ only in the infixed count", got)
+	}
+}
+
+func TestBindTitleIgnoresDroppedPairCount(t *testing.T) {
+	got := Bind([]Seen{fresh(900, "Home | FetLife", full)}, []Stored{left(1, "(6/0) Home | FetLife", "S2", odd)}, thisBoot, map[uint32]bool{900: true})
+	if got[900] != 1 {
+		t.Fatalf("got %v, want 900->1: the stored title had a count the fresh one dropped", got)
+	}
+}
+
+func TestBindCountRuleKeepsOtherText(t *testing.T) {
+	for _, c := range []struct{ fresh, stored string }{
+		{"New Tab", "(2) New Tab Settings"}, // differ beyond the count
+		{"Foo", "(beta) Foo"},               // not a count
+		{"(3)", "(1)"},                      // nothing left to compare
+	} {
+		got := Bind([]Seen{fresh(900, c.fresh, full)}, []Stored{left(1, c.stored, "S2", odd)}, thisBoot, map[uint32]bool{900: true})
+		if len(got) != 0 {
+			t.Fatalf("%q vs %q: got %v, want nothing", c.fresh, c.stored, got)
+		}
+	}
+}

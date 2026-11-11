@@ -1,5 +1,7 @@
 package arrangement
 
+import "regexp"
+
 // Stored is a window as the store last knew it bound: a candidate for
 // binding to a fresh window-server id once that binding is dead. Placement is
 // its open placement in the arrangement being decided when Placed; a candidate
@@ -25,7 +27,8 @@ const (
 // window is a candidate for a fresh one of the same app unless its binding in
 // this boot is live. A pair is made only when the evidence is
 // unambiguous at its strength: one candidate for the fresh window, and one
-// fresh window for that candidate. Stronger evidence is settled first. The
+// fresh window for that candidate. Candidates tied at a strength are narrowed
+// to those bound in the latest boot. Stronger evidence is settled first. The
 // result maps a fresh window's id to the stored window.
 func Bind(fresh []Seen, stored []Stored, boot int64, live map[uint32]bool) map[uint32]int64 {
 	out := make(map[uint32]int64)
@@ -37,16 +40,8 @@ func Bind(fresh []Seen, stored []Stored, boot int64, live map[uint32]bool) map[u
 				if _, done := out[f.Binding]; done {
 					continue
 				}
-				var match *Stored
-				n := 0
-				for i := range stored {
-					o := &stored[i]
-					if !taken[o.Window] && evidence(f, *o, boot, live) >= level {
-						match = o
-						n++
-					}
-				}
-				if n != 1 {
+				match := latest(f, stored, taken, level, boot, live)
+				if match == nil {
 					continue
 				}
 				rivals := 0
@@ -66,6 +61,37 @@ func Bind(fresh []Seen, stored []Stored, boot int64, live map[uint32]bool) map[u
 	return out
 }
 
+// latest returns the one untaken candidate for f at level, or nil. Candidates
+// are narrowed to those bound in the latest boot: twins left by earlier failed
+// binds share title and frame, and the latest is the window. Twins of the same
+// boot stay ambiguous.
+func latest(f Seen, stored []Stored, taken map[int64]bool, level int, boot int64, live map[uint32]bool) *Stored {
+	var match *Stored
+	n := 0
+	for i := range stored {
+		o := &stored[i]
+		if taken[o.Window] || evidence(f, *o, boot, live) < level {
+			continue
+		}
+		switch {
+		case match == nil || o.Boot > match.Boot:
+			match, n = o, 1
+		case o.Boot == match.Boot:
+			n++
+		}
+	}
+	if n != 1 {
+		return nil
+	}
+	return match
+}
+
+// count is an unread count in a title, "(3) " or "(6/0) ", which apps change
+// between boots.
+var count = regexp.MustCompile(`\(\d+(/\d+)?\) ?`)
+
+// evidence rates how strongly f recreates o. Titles are compared with their
+// counts removed; an empty title matches nothing.
 func evidence(f Seen, o Stored, boot int64, live map[uint32]bool) int {
 	if appKey(f.Bundle, f.App) != appKey(o.Bundle, o.App) {
 		return none
@@ -73,7 +99,8 @@ func evidence(f Seen, o Stored, boot int64, live map[uint32]bool) int {
 	if o.Boot == boot && live[o.Binding] {
 		return none
 	}
-	title := f.Title != "" && f.Title == o.Title
+	ft := count.ReplaceAllString(f.Title, "")
+	title := ft != "" && ft == count.ReplaceAllString(o.Title, "")
 	frame := o.Placed && SameFrame(f.Frame, o.Frame)
 	switch {
 	case title && frame:
