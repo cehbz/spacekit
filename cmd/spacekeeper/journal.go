@@ -98,7 +98,7 @@ func placement(p *arrangement.Placement) string {
 	if p == nil {
 		return "none"
 	}
-	return fmt.Sprintf("%.8s %.0f,%.0f %.0fx%.0f", p.Space, p.Frame.X, p.Frame.Y, p.Frame.W, p.Frame.H)
+	return placementText(*p)
 }
 
 // undoCmd reverts one change; the running agent puts the windows back at its

@@ -81,3 +81,27 @@ func TestMatchWindowsByAppOrTitleIgnoringCase(t *testing.T) {
 		t.Fatalf("zzz: %+v", got)
 	}
 }
+
+// inspect W shows a fullscreen target, the adopt that opened it, and the
+// change that put the window on a fullscreen space, each as fullscreen@ and
+// the display.
+func TestInspectShowsTheFullscreenForm(t *testing.T) {
+	d := "37D8832A-2D66-02CA-B9F7-8F30A301B230"
+	fs := arrangement.FullscreenOn(d)
+	at := time.Date(2026, 11, 11, 21, 37, 40, 0, time.Local)
+	want := "  target on 37D8832A" + strings.Repeat(" ", 11) + "fullscreen@37D8832A  since 2026-11-11 21:37:40 (#1406)  clean"
+	if got := targetLine(store.Target{DisplaySet: d, Placement: fs, Since: at, Change: 1406}); got != want {
+		t.Fatalf("target line\n%q\nwant\n%q", got, want)
+	}
+	steps := []store.Step{{At: at, Change: 1406, Cause: "window settled", Kind: "adopted", Opened: &fs}}
+	raws := []store.Raw{{At: at.Add(-10 * time.Millisecond), Kind: "window changed",
+		Payload: `{"Window":1198,"Space":0,"Fullscreen":"` + d + `","Frame":{"X":-1470,"Y":283,"W":1470,"H":923},"Gone":false}`}}
+	got := explainLines(steps, raws, 1198)
+	lines := []string{
+		"21:37:39.990  window changed       fullscreen@37D8832A",
+		"21:37:40.000  adopted              #1406 window settled → fullscreen@37D8832A",
+	}
+	if strings.Join(got, "\n") != strings.Join(lines, "\n") {
+		t.Fatalf("lines:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(lines, "\n"))
+	}
+}

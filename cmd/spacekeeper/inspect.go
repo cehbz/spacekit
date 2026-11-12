@@ -73,15 +73,7 @@ func inspectWindow(arg string, record bool, last int) error {
 	}
 	fmt.Printf("record #%d  %s | %s  (%s)  first seen %s\n", rec.Window, rec.App, rec.Title, rec.Bundle, rec.FirstSeen.Format("2006-01-02 15:04"))
 	for _, t := range rec.Targets {
-		state := "clean"
-		if t.Dirty {
-			state = "dirty"
-			if t.Progress != 0 {
-				state = "dirty, put tried"
-			}
-		}
-		fmt.Printf("  target on %-18s %-8.8s %.0f,%.0f %.0fx%.0f  since %s (#%d)  %s\n",
-			shortDisplaySet(t.DisplaySet), t.Space, t.Frame.X, t.Frame.Y, t.Frame.W, t.Frame.H, t.Since.Format("2006-01-02 15:04:05"), t.Change, state)
+		fmt.Println(targetLine(t))
 	}
 	bs, err := st.Bindings(win)
 	if err != nil {
@@ -122,6 +114,20 @@ func inspectWindow(arg string, record bool, last int) error {
 		fmt.Println(l)
 	}
 	return nil
+}
+
+// targetLine is one of a record's targets: its display set, where, since
+// when and by which change, and whether it is dirty.
+func targetLine(t store.Target) string {
+	state := "clean"
+	if t.Dirty {
+		state = "dirty"
+		if t.Progress != 0 {
+			state = "dirty, put tried"
+		}
+	}
+	return fmt.Sprintf("  target on %-18s %s  since %s (#%d)  %s",
+		shortDisplaySet(t.DisplaySet), placementText(t.Placement), t.Since.Format("2006-01-02 15:04:05"), t.Change, state)
 }
 
 // recordTitles is the recorded title of each live window bound in this boot.
@@ -182,8 +188,7 @@ func explainLines(steps []store.Step, raws []store.Raw, wid uint32) []string {
 	for _, s := range steps {
 		text := fmt.Sprintf("%s  %-20s #%d %s", s.At.Format("15:04:05.000"), s.Kind, s.Change, s.Cause)
 		if s.Opened != nil {
-			f := s.Opened.Frame
-			text += fmt.Sprintf(" → %.8s %.0f,%.0f %.0fx%.0f", s.Opened.Space, f.X, f.Y, f.W, f.H)
+			text += " → " + placementText(*s.Opened)
 		}
 		ls = append(ls, line{s.At, text})
 	}
@@ -212,14 +217,21 @@ func explainLines(steps []store.Step, raws []store.Raw, wid uint32) []string {
 var duplicated = map[string]bool{"window moved": true, "window resized": true, "target changed": true}
 
 // rawDetail is the part of a window event worth a glance: its space and,
-// for a change, its frame.
+// for a change, its frame; or the display it is fullscreen on.
 func rawDetail(r store.Raw) string {
 	var p struct {
-		Space uint64
-		Gone  bool
-		Frame *struct{ X, Y, W, H float64 }
+		Space      uint64
+		Fullscreen string
+		Gone       bool
+		Frame      *struct{ X, Y, W, H float64 }
 	}
-	if json.Unmarshal([]byte(r.Payload), &p) != nil || p.Space == 0 {
+	if json.Unmarshal([]byte(r.Payload), &p) != nil {
+		return ""
+	}
+	if p.Fullscreen != "" {
+		return fmt.Sprintf("fullscreen@%.8s", p.Fullscreen)
+	}
+	if p.Space == 0 {
 		return ""
 	}
 	s := fmt.Sprintf("space %d", p.Space)
