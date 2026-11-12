@@ -98,6 +98,9 @@ var migrations = []string{
 	PRAGMA user_version = 5;
 	COMMIT;
 	PRAGMA foreign_keys = ON;`,
+	// 6: a display's fullscreen row in space holds the fullscreen targets on
+	// that display; readers take the form from this column, not from the key.
+	`ALTER TABLE space ADD COLUMN fullscreen INTEGER NOT NULL DEFAULT 0`,
 }
 
 func migrate(db *sql.DB) error {
@@ -154,9 +157,10 @@ func (s *Store) SetSpaces(arr int64, spaces []layout.SavedSpace) error {
 	return tx.Commit()
 }
 
-// Spaces returns every space the arrangement has had.
+// Spaces returns every space the arrangement has had. The displays'
+// fullscreen rows are not spaces and are left out.
 func (s *Store) Spaces(arr int64) ([]layout.SavedSpace, error) {
-	rows, err := s.db.Query(`SELECT key, display, idx FROM space WHERE arrangement_id = ? ORDER BY display, idx`, arr)
+	rows, err := s.db.Query(`SELECT key, display, idx FROM space WHERE arrangement_id = ? AND fullscreen = 0 ORDER BY display, idx`, arr)
 	if err != nil {
 		return nil, err
 	}
@@ -176,10 +180,11 @@ func (s *Store) Spaces(arr int64) ([]layout.SavedSpace, error) {
 // placement in the arrangement, if any, and whether they are dirty.
 func (s *Store) Recorded(arr int64, boot time.Time) ([]arrangement.Recorded, error) {
 	rows, err := s.db.Query(`
-		SELECT w.id, b.wid, p.space, p.x, p.y, p.w, p.h, o.progress
+		SELECT w.id, b.wid, p.space, COALESCE(sp.fullscreen, 0), COALESCE(sp.display, ''), p.x, p.y, p.w, p.h, o.progress
 		FROM binding b
 		JOIN window w ON w.id = b.window_id
 		LEFT JOIN placement p ON p.window_id = w.id AND p.arrangement_id = ?1 AND p.closed_by IS NULL
+		LEFT JOIN space sp ON sp.arrangement_id = p.arrangement_id AND sp.key = p.space
 		LEFT JOIN owed o ON o.window_id = w.id AND o.arrangement_id = ?1
 		WHERE b.boot = ?2
 		ORDER BY w.id`, arr, boot.Unix())
@@ -191,15 +196,17 @@ func (s *Store) Recorded(arr int64, boot time.Time) ([]arrangement.Recorded, err
 	for rows.Next() {
 		var r arrangement.Recorded
 		var space sql.NullString
+		var fullscreen bool
+		var display string
 		var x, y, w, h sql.NullFloat64
 		var progress sql.NullInt64
-		if err := rows.Scan(&r.Window, &r.Binding, &space, &x, &y, &w, &h, &progress); err != nil {
+		if err := rows.Scan(&r.Window, &r.Binding, &space, &fullscreen, &display, &x, &y, &w, &h, &progress); err != nil {
 			return nil, err
 		}
 		if space.Valid {
 			r.Placed = true
-			r.Placement = arrangement.Placement{Space: space.String,
-				Frame: layout.Rect{X: x.Float64, Y: y.Float64, W: w.Float64, H: h.Float64}}
+			r.Placement = readPlacement(space.String, fullscreen, display,
+				layout.Rect{X: x.Float64, Y: y.Float64, W: w.Float64, H: h.Float64})
 		}
 		if progress.Valid {
 			r.Dirty, r.Progress = true, arrangement.Progress(progress.Int64)
@@ -324,15 +331,42 @@ func newWindow(tx *sql.Tx, boot, at time.Time, s arrangement.Seen) (int64, error
 }
 
 // place closes the window's current placement in the arrangement, if any,
-// and opens p.
+// and opens p. A fullscreen target is opened on its display's fullscreen
+// row, created on first use.
 func place(tx *sql.Tx, change, arr, win int64, p arrangement.Placement) error {
+	if p.Fullscreen != "" {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO space(arrangement_id, key, display, idx, fullscreen) VALUES (?, ?, ?, -1, 1)`,
+			arr, placementKey(p), p.Fullscreen); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(`UPDATE placement SET closed_by = ? WHERE window_id = ? AND arrangement_id = ? AND closed_by IS NULL`,
 		change, win, arr); err != nil {
 		return err
 	}
 	_, err := tx.Exec(`INSERT INTO placement(window_id, arrangement_id, space, x, y, w, h, opened_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		win, arr, p.Space, p.Frame.X, p.Frame.Y, p.Frame.W, p.Frame.H, change)
+		win, arr, placementKey(p), p.Frame.X, p.Frame.Y, p.Frame.W, p.Frame.H, change)
 	return err
+}
+
+// placementKey is the space column a placement is stored under: its space
+// key, or for a fullscreen target its display's fullscreen row. The key is
+// written, never parsed: readers take the form from space.fullscreen and the
+// display from space.display.
+func placementKey(p arrangement.Placement) string {
+	if p.Fullscreen != "" {
+		return "fullscreen:" + p.Fullscreen
+	}
+	return p.Space
+}
+
+// readPlacement is a stored placement as read back with its space row: the
+// fullscreen form on the row's display, or the space and frame.
+func readPlacement(space string, fullscreen bool, display string, f layout.Rect) arrangement.Placement {
+	if fullscreen {
+		return arrangement.FullscreenOn(display)
+	}
+	return arrangement.Placement{Space: space, Frame: f}
 }
 
 func event(tx *sql.Tx, change, win int64, kind string) error {
@@ -422,11 +456,13 @@ func (s *Store) RefreshTitles(boot time.Time, seen []arrangement.Seen) error {
 func (s *Store) Stored(arr int64) ([]arrangement.Stored, error) {
 	rows, err := s.db.Query(`
 		SELECT w.id, a.bundle, a.name, w.title,
-		       p.space IS NOT NULL, COALESCE(p.space, ''), COALESCE(p.x, 0), COALESCE(p.y, 0), COALESCE(p.w, 0), COALESCE(p.h, 0),
+		       p.space IS NOT NULL, COALESCE(p.space, ''), COALESCE(sp.fullscreen, 0), COALESCE(sp.display, ''),
+		       COALESCE(p.x, 0), COALESCE(p.y, 0), COALESCE(p.w, 0), COALESCE(p.h, 0),
 		       COALESCE(b.boot, 0), COALESCE(b.wid, 0)
 		FROM window w
 		JOIN app a ON a.id = w.app_id
 		LEFT JOIN placement p ON p.window_id = w.id AND p.arrangement_id = ?1 AND p.closed_by IS NULL
+		LEFT JOIN space sp ON sp.arrangement_id = p.arrangement_id AND sp.key = p.space
 		LEFT JOIN binding b ON b.rowid = (SELECT MAX(rowid) FROM binding WHERE window_id = w.id)
 		ORDER BY w.id`, arr)
 	if err != nil {
@@ -436,10 +472,14 @@ func (s *Store) Stored(arr int64) ([]arrangement.Stored, error) {
 	var out []arrangement.Stored
 	for rows.Next() {
 		var o arrangement.Stored
-		if err := rows.Scan(&o.Window, &o.Bundle, &o.App, &o.Title, &o.Placed, &o.Space, &o.Frame.X, &o.Frame.Y, &o.Frame.W, &o.Frame.H,
+		var space, display string
+		var fullscreen bool
+		var f layout.Rect
+		if err := rows.Scan(&o.Window, &o.Bundle, &o.App, &o.Title, &o.Placed, &space, &fullscreen, &display, &f.X, &f.Y, &f.W, &f.H,
 			&o.Boot, &o.Binding); err != nil {
 			return nil, err
 		}
+		o.Placement = readPlacement(space, fullscreen, display, f)
 		out = append(out, o)
 	}
 	return out, rows.Err()
@@ -570,15 +610,20 @@ func (s *Store) events(change int64) ([]Event, error) {
 // version returns the placement of a window that a change closed or opened
 // (column is closed_by or opened_by), or nil.
 func (s *Store) version(column string, change, win int64) (*arrangement.Placement, error) {
-	var p arrangement.Placement
-	err := s.db.QueryRow(`SELECT space, x, y, w, h FROM placement WHERE window_id = ? AND `+column+` = ?`, win, change).
-		Scan(&p.Space, &p.Frame.X, &p.Frame.Y, &p.Frame.W, &p.Frame.H)
+	var space, display string
+	var fullscreen bool
+	var f layout.Rect
+	err := s.db.QueryRow(`SELECT p.space, COALESCE(sp.fullscreen, 0), COALESCE(sp.display, ''), p.x, p.y, p.w, p.h FROM placement p
+		LEFT JOIN space sp ON sp.arrangement_id = p.arrangement_id AND sp.key = p.space
+		WHERE p.window_id = ? AND p.`+column+` = ?`, win, change).
+		Scan(&space, &fullscreen, &display, &f.X, &f.Y, &f.W, &f.H)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	p := readPlacement(space, fullscreen, display, f)
 	return &p, nil
 }
 
@@ -842,8 +887,9 @@ func (s *Store) Window(win int64) (WindowRecord, error) {
 	}
 	r.FirstSeen = time.UnixMilli(first)
 	rows, err := s.db.Query(`
-		SELECT p.arrangement_id, ar.display_set, p.space, p.x, p.y, p.w, p.h, c.at, c.id, o.progress
+		SELECT p.arrangement_id, ar.display_set, p.space, COALESCE(sp.fullscreen, 0), COALESCE(sp.display, ''), p.x, p.y, p.w, p.h, c.at, c.id, o.progress
 		FROM placement p JOIN arrangement ar ON ar.id = p.arrangement_id JOIN change c ON c.id = p.opened_by
+		LEFT JOIN space sp ON sp.arrangement_id = p.arrangement_id AND sp.key = p.space
 		LEFT JOIN owed o ON o.window_id = p.window_id AND o.arrangement_id = p.arrangement_id
 		WHERE p.window_id = ? AND p.closed_by IS NULL ORDER BY p.arrangement_id`, win)
 	if err != nil {
@@ -854,9 +900,13 @@ func (s *Store) Window(win int64) (WindowRecord, error) {
 		var t Target
 		var at int64
 		var progress sql.NullInt64
-		if err := rows.Scan(&t.Arrangement, &t.DisplaySet, &t.Space, &t.Frame.X, &t.Frame.Y, &t.Frame.W, &t.Frame.H, &at, &t.Change, &progress); err != nil {
+		var space, display string
+		var fullscreen bool
+		var f layout.Rect
+		if err := rows.Scan(&t.Arrangement, &t.DisplaySet, &space, &fullscreen, &display, &f.X, &f.Y, &f.W, &f.H, &at, &t.Change, &progress); err != nil {
 			return r, err
 		}
+		t.Placement = readPlacement(space, fullscreen, display, f)
 		t.Since = time.UnixMilli(at)
 		if progress.Valid {
 			t.Dirty, t.Progress = true, arrangement.Progress(progress.Int64)
@@ -889,9 +939,10 @@ func (s *Store) Bindings(win int64) ([]Binding, error) {
 // History lists the last decisions about a window, oldest first.
 func (s *Store) History(win int64, last int) ([]Step, error) {
 	rows, err := s.db.Query(`
-		SELECT c.id, c.at, c.cause, e.kind, p.space, p.x, p.y, p.w, p.h
+		SELECT c.id, c.at, c.cause, e.kind, p.space, COALESCE(sp.fullscreen, 0), COALESCE(sp.display, ''), p.x, p.y, p.w, p.h
 		FROM event e JOIN change c ON c.id = e.change_id
 		LEFT JOIN placement p ON p.window_id = e.window_id AND p.opened_by = c.id
+		LEFT JOIN space sp ON sp.arrangement_id = p.arrangement_id AND sp.key = p.space
 		WHERE e.window_id = ? ORDER BY e.id DESC LIMIT ?`, win, last)
 	if err != nil {
 		return nil, err
@@ -902,13 +953,16 @@ func (s *Store) History(win int64, last int) ([]Step, error) {
 		var st Step
 		var at int64
 		var space sql.NullString
+		var fullscreen bool
+		var display string
 		var x, y, w, h sql.NullFloat64
-		if err := rows.Scan(&st.Change, &at, &st.Cause, &st.Kind, &space, &x, &y, &w, &h); err != nil {
+		if err := rows.Scan(&st.Change, &at, &st.Cause, &st.Kind, &space, &fullscreen, &display, &x, &y, &w, &h); err != nil {
 			return nil, err
 		}
 		st.At = time.UnixMilli(at)
 		if space.Valid {
-			st.Opened = &arrangement.Placement{Space: space.String, Frame: layout.Rect{X: x.Float64, Y: y.Float64, W: w.Float64, H: h.Float64}}
+			p := readPlacement(space.String, fullscreen, display, layout.Rect{X: x.Float64, Y: y.Float64, W: w.Float64, H: h.Float64})
+			st.Opened = &p
 		}
 		out = append(out, st)
 	}

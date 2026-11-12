@@ -817,8 +817,8 @@ func TestMigrationSplitsAppFromWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if v := count(t, s, `PRAGMA user_version`); v != 5 {
-		t.Fatalf("user_version = %d, want 5", v)
+	if v := count(t, s, `PRAGMA user_version`); v != len(migrations) {
+		t.Fatalf("user_version = %d, want %d", v, len(migrations))
 	}
 	if n := count(t, s, `SELECT COUNT(*) FROM app`); n != 2 {
 		t.Fatalf("apps = %d, want 2", n)
@@ -858,7 +858,7 @@ func TestMigrationSplitsAppFromWindow(t *testing.T) {
 	if err != nil || len(st) != 4 {
 		t.Fatalf("Stored(air) = %+v, %v; want all four windows", st, err)
 	}
-	// Reopening is a no-op at version 5.
+	// Reopening is a no-op at the latest version.
 	s.Close()
 	if s2, err := Open(path); err != nil {
 		t.Fatalf("reopen: %v", err)
@@ -942,5 +942,86 @@ func TestWindowRecordCarriesTargetsAndBindings(t *testing.T) {
 	bs, err := s.Bindings(r.Window)
 	if err != nil || len(bs) != 1 || bs[0].WID != 42 || !bs[0].Boot.Equal(boot) {
 		t.Fatalf("bindings %+v %v", bs, err)
+	}
+}
+
+// seenAs is window wid seen at placement p.
+func seenAs(wid uint32, p arrangement.Placement) arrangement.Seen {
+	s := seen(wid, "", layout.Rect{})
+	s.Placement = p
+	return s
+}
+
+// adoptAt records that window win (wid in this boot) is now at p.
+func adoptAt(t *testing.T, s *Store, arr int64, at time.Time, win int64, wid uint32, p arrangement.Placement) {
+	t.Helper()
+	if err := s.Apply(arr, boot, at, "window settled", []arrangement.Decision{{Kind: arrangement.Adopt, Window: win, Seen: seenAs(wid, p)}}); err != nil {
+		t.Fatalf("recording %+v: %v", p, err)
+	}
+}
+
+// Entering fullscreen by hand replaces the window's placement with the
+// fullscreen target, and leaving replaces that with the landing placement,
+// each as a new version. The fullscreen target is not one of the spaces.
+func TestFullscreenTargetReplacesAPlacementAndBack(t *testing.T) {
+	s := open(t)
+	arr := arrangementWith(t, s, "D1", "S1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	fs := arrangement.FullscreenOn("D1")
+	adoptAt(t, s, arr, t0.Add(time.Minute), r.Window, 42, fs)
+	if got := one(t, s, arr); !got.Placed || got.Placement != fs {
+		t.Fatalf("after entering fullscreen: %+v, want the target fullscreen on D1", got)
+	}
+	back := arrangement.Placement{Space: "S1", Frame: half}
+	adoptAt(t, s, arr, t0.Add(2*time.Minute), r.Window, 42, back)
+	if got := one(t, s, arr); got.Placement != back {
+		t.Fatalf("after leaving fullscreen: %+v, want S1 at the landing frame", got)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM placement WHERE window_id = ?`, r.Window); n != 3 {
+		t.Fatalf("versions = %d, want 3", n)
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM placement WHERE window_id = ? AND closed_by IS NULL`, r.Window); n != 1 {
+		t.Fatalf("open versions = %d, want 1", n)
+	}
+	spaces, err := s.Spaces(arr)
+	if err != nil || len(spaces) != 1 || spaces[0].UUID != "S1" {
+		t.Fatalf("Spaces = %+v, %v; want S1 only", spaces, err)
+	}
+}
+
+// Every reader of targets returns the fullscreen form: binding candidates,
+// the window record, its history and the journal.
+func TestFullscreenTargetReadsBackEverywhere(t *testing.T) {
+	s := open(t)
+	arr := arrangementWith(t, s, "D1", "S1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	fs := arrangement.FullscreenOn("D1")
+	adoptAt(t, s, arr, t0.Add(time.Minute), r.Window, 42, fs)
+	st, err := s.Stored(arr)
+	if err != nil || len(st) != 1 || !st[0].Placed || st[0].Placement != fs {
+		t.Fatalf("Stored = %+v, %v; want the candidate fullscreen on D1", st, err)
+	}
+	rec, err := s.Window(r.Window)
+	if err != nil || len(rec.Targets) != 1 || rec.Targets[0].Placement != fs {
+		t.Fatalf("Window targets = %+v, %v; want fullscreen on D1", rec.Targets, err)
+	}
+	hist, err := s.History(r.Window, 10)
+	if err != nil || len(hist) != 2 || hist[1].Opened == nil || *hist[1].Opened != fs {
+		t.Fatalf("History = %+v, %v; want the second adopt to open fullscreen on D1", hist, err)
+	}
+	js, err := s.Journal(10)
+	if err != nil || len(js) == 0 {
+		t.Fatalf("Journal = %+v, %v", js, err)
+	}
+	ev := js[len(js)-1].Events
+	if len(ev) != 1 || ev[0].From == nil || *ev[0].From != (arrangement.Placement{Space: "S1", Frame: full}) || ev[0].To == nil || *ev[0].To != fs {
+		t.Fatalf("the last change's events %+v, want S1 -> fullscreen on D1", ev)
+	}
+}
+
+func TestMigrationGivesSpacesAFullscreenColumn(t *testing.T) {
+	s := open(t)
+	if n := count(t, s, `SELECT COUNT(*) FROM pragma_table_info('space') WHERE name = 'fullscreen'`); n != 1 {
+		t.Fatalf("space.fullscreen columns = %d, want 1", n)
 	}
 }
