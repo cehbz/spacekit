@@ -18,13 +18,13 @@ func TestInPlaceHysteresis(t *testing.T) {
 		q    Placement
 		want bool
 	}{
-		{"identical", Placement{"S1", full}, true},
-		{"three points off on every edge", Placement{"S1", layout.Rect{X: 3, Y: 27, W: 1280, H: 1410}}, true},
-		{"width one point narrower", Placement{"S1", layout.Rect{X: 0, Y: 30, W: 1279, H: 1410}}, true},
-		{"four points off", Placement{"S1", layout.Rect{X: 4, Y: 30, W: 1280, H: 1410}}, false},
-		{"far edge four points off", Placement{"S1", layout.Rect{X: 0, Y: 30, W: 1284, H: 1410}}, false},
-		{"shrunk", Placement{"S1", shrunk}, false},
-		{"other space, same frame", Placement{"S2", full}, false},
+		{"identical", Placement{Space: "S1", Frame: full}, true},
+		{"three points off on every edge", Placement{Space: "S1", Frame: layout.Rect{X: 3, Y: 27, W: 1280, H: 1410}}, true},
+		{"width one point narrower", Placement{Space: "S1", Frame: layout.Rect{X: 0, Y: 30, W: 1279, H: 1410}}, true},
+		{"four points off", Placement{Space: "S1", Frame: layout.Rect{X: 4, Y: 30, W: 1280, H: 1410}}, false},
+		{"far edge four points off", Placement{Space: "S1", Frame: layout.Rect{X: 0, Y: 30, W: 1284, H: 1410}}, false},
+		{"shrunk", Placement{Space: "S1", Frame: shrunk}, false},
+		{"other space, same frame", Placement{Space: "S2", Frame: full}, false},
 	}
 	for _, c := range cases {
 		if got := p.InPlace(c.q); got != c.want {
@@ -34,11 +34,11 @@ func TestInPlaceHysteresis(t *testing.T) {
 }
 
 func rec(binding uint32, space string, f layout.Rect) Recorded {
-	return Recorded{Window: int64(binding) + 100, Binding: binding, Placed: true, Placement: Placement{space, f}}
+	return Recorded{Window: int64(binding) + 100, Binding: binding, Placed: true, Placement: Placement{Space: space, Frame: f}}
 }
 
 func saw(binding uint32, space string, f layout.Rect) Seen {
-	return Seen{Binding: binding, PID: 1, App: "A", Placement: Placement{space, f}}
+	return Seen{Binding: binding, PID: 1, App: "A", Placement: Placement{Space: space, Frame: f}}
 }
 
 func kinds(ds []Decision) []Kind {
@@ -141,7 +141,7 @@ func TestDecideDirtyAtTargetIsClean(t *testing.T) {
 func TestDecideDirtyOffTargetIsPut(t *testing.T) {
 	ds := Decide([]Recorded{dirtyRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S2", shrunk)}, System: sys(1)})
 	wantKinds(t, ds, Put)
-	if !ds[0].Move || !ds[0].Resize || ds[0].Want != (Placement{"S1", full}) {
+	if !ds[0].Move || !ds[0].Resize || ds[0].Want != (Placement{Space: "S1", Frame: full}) {
 		t.Fatalf("want move and resize to the target, got %+v", ds[0])
 	}
 }
@@ -149,7 +149,7 @@ func TestDecideDirtyOffTargetIsPut(t *testing.T) {
 func TestDecideFailedPutIsReportedOnce(t *testing.T) {
 	ds := Decide([]Recorded{dirtyRec(1, "S1", full, Attempted)}, Look{Windows: []Seen{saw(1, "S1", shrunk)}, System: sys(1)})
 	wantKinds(t, ds, Failed)
-	if ds[0].Want != (Placement{"S1", full}) || ds[0].Move || ds[0].Resize {
+	if ds[0].Want != (Placement{Space: "S1", Frame: full}) || ds[0].Move || ds[0].Resize {
 		t.Fatalf("a failed put names the target and orders nothing: %+v", ds[0])
 	}
 	if _, ok := ds[0].Progress(); ok {
@@ -171,7 +171,7 @@ func TestDecideRetryPutsAnAttemptedWindowAgain(t *testing.T) {
 	r := []Recorded{dirtyRec(1, "S1", full, Attempted)}
 	ds := Decide(r, Look{Windows: []Seen{saw(1, "S1", shrunk)}, System: sys(1), Retry: true})
 	wantKinds(t, ds, Put)
-	if ds[0].Move || !ds[0].Resize || ds[0].Want != (Placement{"S1", full}) {
+	if ds[0].Move || !ds[0].Resize || ds[0].Want != (Placement{Space: "S1", Frame: full}) {
 		t.Fatalf("want a resize back to the target, got %+v", ds[0])
 	}
 	ds = Decide(r, Look{Windows: []Seen{saw(1, "S1", shrunk)}, System: sys(1)})
@@ -183,7 +183,36 @@ func TestDecideRetryPutsAnAttemptedWindowAgain(t *testing.T) {
 func TestDecideUntriedDirtyIsPutWhateverTheCause(t *testing.T) {
 	ds := Decide([]Recorded{dirtyRec(1, "S1", full, Untried)}, Look{Windows: []Seen{saw(1, "S2", shrunk)}})
 	wantKinds(t, ds, Put)
-	if !ds[0].Move || !ds[0].Resize || ds[0].Want != (Placement{"S1", full}) {
+	if !ds[0].Move || !ds[0].Resize || ds[0].Want != (Placement{Space: "S1", Frame: full}) {
 		t.Fatalf("want move and resize to the target, got %+v", ds[0])
+	}
+}
+
+func TestInPlaceComparesForms(t *testing.T) {
+	cases := []struct {
+		name string
+		p, q Placement
+		want bool
+	}{
+		{"fullscreen on the same display", FullscreenOn("D1"), FullscreenOn("D1"), true},
+		{"fullscreen on another display", FullscreenOn("D1"), FullscreenOn("D2"), false},
+		{"fullscreen against a placement", FullscreenOn("D1"), Placement{Space: "S1", Frame: full}, false},
+		{"a placement against fullscreen", Placement{Space: "S1", Frame: full}, FullscreenOn("D1"), false},
+	}
+	for _, c := range cases {
+		if got := c.p.InPlace(c.q); got != c.want {
+			t.Errorf("%s: InPlace = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// A window whose target is fullscreen on D1 reappears as a normal window: it
+// is dirty, and the put is one move, to fullscreen on D1.
+func TestDecideReappearedNormalWithAFullscreenTargetIsPutToFullscreen(t *testing.T) {
+	r := Recorded{Window: 101, Binding: 1, Placed: true, Placement: FullscreenOn("D1")}
+	ds := Decide([]Recorded{r}, Look{Windows: []Seen{saw(1, "S1", full)}, System: sys(1)})
+	wantKinds(t, ds, Dirty, Put)
+	if d := ds[1]; !d.Move || d.Resize || d.Want != FullscreenOn("D1") {
+		t.Fatalf("want one move to fullscreen on D1, got %+v", d)
 	}
 }

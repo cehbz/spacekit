@@ -5,7 +5,7 @@ import "regexp"
 // Stored is a window as the store last knew it bound: a candidate for
 // binding to a fresh window-server id once that binding is dead. Placement is
 // its open placement in the arrangement being decided when Placed; a candidate
-// recorded only elsewhere offers no frame evidence.
+// recorded only elsewhere, or fullscreen here, offers no frame evidence.
 type Stored struct {
 	Window             int64
 	Bundle, App, Title string
@@ -95,7 +95,8 @@ func latest(f Seen, stored []Stored, taken map[int64]bool, level int, boot int64
 var count = regexp.MustCompile(`\(\d+(/\d+)?\) ?`)
 
 // evidence rates how strongly f recreates o. Titles are compared with their
-// counts removed; an empty title matches nothing.
+// counts removed; an empty title matches nothing. A fullscreen window, fresh
+// or stored, has no frame to compare.
 func evidence(f Seen, o Stored, boot int64, live map[uint32]bool) int {
 	if appKey(f.Bundle, f.App) != appKey(o.Bundle, o.App) {
 		return none
@@ -105,7 +106,7 @@ func evidence(f Seen, o Stored, boot int64, live map[uint32]bool) int {
 	}
 	ft := count.ReplaceAllString(f.Title, "")
 	title := ft != "" && ft == count.ReplaceAllString(o.Title, "")
-	frame := o.Placed && SameFrame(f.Frame, o.Frame)
+	frame := o.Placed && o.Fullscreen == "" && f.Fullscreen == "" && SameFrame(f.Frame, o.Frame)
 	switch {
 	case title && frame:
 		return titleAndFrame

@@ -13,16 +13,25 @@ import (
 // counts as in place: a difference inside it is neither adopted nor put back.
 const Tolerance = 3.0
 
-// Placement is where a window belongs: a space and a frame. Space is a space
-// key: the space UUID, or display:<uuid>/<index> for the untitled desktop.
+// Placement is where a window belongs, in one of two forms: a space and a
+// frame, or fullscreen on a display. Space is a space key: the space UUID, or
+// display:<uuid>/<index> for the untitled desktop. Fullscreen is the display
+// UUID of the fullscreen form; Space and Frame are empty in it.
 type Placement struct {
-	Space string
-	Frame layout.Rect
+	Space      string
+	Frame      layout.Rect
+	Fullscreen string
 }
 
-// InPlace reports whether q is on the same space as p and within Tolerance of
-// it on every edge.
+// FullscreenOn is the fullscreen form on a display.
+func FullscreenOn(display string) Placement { return Placement{Fullscreen: display} }
+
+// InPlace reports whether q is where p is: both fullscreen on the same
+// display, or both on the same space and within Tolerance on every edge.
 func (p Placement) InPlace(q Placement) bool {
+	if p.Fullscreen != "" || q.Fullscreen != "" {
+		return p.Fullscreen == q.Fullscreen
+	}
 	return p.Space == q.Space && SameFrame(p.Frame, q.Frame)
 }
 
@@ -84,7 +93,7 @@ type Decision struct {
 	Window       int64 // 0: a window never seen before
 	Seen         Seen
 	Want         Placement // Put, Failed: the target
-	Move, Resize bool      // Put: what to do at this decide
+	Move, Resize bool      // Put: what to do at this decide; a fullscreen target is one Move
 }
 
 // Decide compares each seen window with its record. A window with no record
@@ -129,12 +138,17 @@ func Decide(recorded []Recorded, look Look) []Decision {
 	return out
 }
 
+// put orders a dirty window to its target: a move, a resize or both, or for
+// a fullscreen target one move, which the putter carries out as staging the
+// window to the display's shown space and setting AXFullScreen.
 func put(r Recorded, s Seen) Decision {
-	return Decision{
-		Kind: Put, Window: r.Window, Seen: s, Want: r.Placement,
-		Move:   s.Space != r.Space,
-		Resize: !SameFrame(r.Frame, s.Frame),
+	d := Decision{Kind: Put, Window: r.Window, Seen: s, Want: r.Placement}
+	if r.Fullscreen != "" {
+		d.Move = true
+		return d
 	}
+	d.Move, d.Resize = s.Space != r.Space, !SameFrame(r.Frame, s.Frame)
+	return d
 }
 
 // Progress is what a put leaves for the next decide: Attempted once the

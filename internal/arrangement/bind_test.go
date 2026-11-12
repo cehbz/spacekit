@@ -220,3 +220,19 @@ func TestBindLaterBootBreaksOnlyFullTies(t *testing.T) {
 		t.Fatalf("frame only: got %v, want nothing", got)
 	}
 }
+
+// A fullscreen window has no frame to compare: a fullscreen candidate binds
+// a fullscreen window on title only.
+func TestBindFullscreenOffersNoFrameEvidence(t *testing.T) {
+	stored := []Stored{{Window: 1, Bundle: "com.google.Chrome", App: "Google Chrome", Title: "autobrr",
+		Placement: FullscreenOn("D1"), Placed: true, Boot: thisBoot - 86400, Binding: 1}}
+	renamed := Seen{Binding: 900, PID: 5, Bundle: "com.google.Chrome", App: "Google Chrome", Title: "renamed", Placement: FullscreenOn("D1")}
+	if got := Bind([]Seen{renamed}, stored, thisBoot, map[uint32]bool{900: true}); len(got) != 0 {
+		t.Fatalf("got %v, want nothing: fullscreen windows offer no frame evidence", got)
+	}
+	same := renamed
+	same.Title = "autobrr"
+	if got := Bind([]Seen{same}, stored, thisBoot, map[uint32]bool{900: true}); got[900] != 1 {
+		t.Fatalf("got %v, want 900->1 on title", got)
+	}
+}
