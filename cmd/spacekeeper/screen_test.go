@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -560,5 +561,59 @@ func TestWatchedSetCaps(t *testing.T) {
 	}
 	if w.Overflow() != 76 {
 		t.Fatalf("Overflow = %d, want 76", w.Overflow())
+	}
+}
+
+// fsDisplay is D1 with s1 (100), s2 (200) and the fullscreen space 300
+// appended last, showing shown.
+func fsDisplay(shown uint64) *skylight.Display {
+	return &skylight.Display{UUID: "D1", CurrentSpace: skylight.Space{ManagedSpaceID: shown},
+		Spaces: []skylight.Space{{ManagedSpaceID: 100, UUID: "s1"}, {ManagedSpaceID: 200, UUID: "s2"}, {ManagedSpaceID: 300, Type: 4}}}
+}
+
+// Entering fullscreen: the space is created and the window attaches to it;
+// the change names the display the window is fullscreen on.
+func TestScreenFullscreenAttachNamesTheDisplay(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, _, out := startScreen(t, r, CurrentChanged{}, WindowChanged{})
+	expectEvent(t, out, CurrentChanged{}, time.Second) // startup
+	r.display = fsDisplay(300)
+	b.Publish(event.SpaceCreated{Stamp: event.Now(), Space: 300})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	r.windows = map[uint32]layout.LiveWindow{1: {ID: 1, OwnerPID: 10, OwnerName: "A", Title: "one", Frame: layout.Rect{W: 100, H: 100}}}
+	r.spaces = map[uint32][]uint64{1: {300}}
+	b.Publish(event.WindowAttached{Stamp: event.Now(), Window: 1, Space: 300})
+	expectEvent(t, out, CurrentChanged{}, time.Second)
+	c := expectEvent(t, out, WindowChanged{}, time.Second).(WindowChanged)
+	if c.Window != 1 || c.Fullscreen != "D1" || c.Space != 0 {
+		t.Fatalf("change = %+v, want window 1 fullscreen on D1", c)
+	}
+}
+
+// A space event after which a display shows another space says so, once.
+func TestScreenSpaceSwitchPublishesTheShownSpace(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, _, out := startScreen(t, r, SpaceShown{})
+	r.display = fsDisplay(300)
+	b.Publish(event.SpaceSwitched{Stamp: event.Now()})
+	got := expectEvent(t, out, SpaceShown{}, time.Second).(SpaceShown)
+	if got.Display != "D1" || got.Space != 300 {
+		t.Fatalf("shown = %+v, want D1 showing 300", got)
+	}
+	b.Publish(event.SpaceSwitched{Stamp: event.Now()}) // D1 still shows 300
+	expectNone(t, out, 100*time.Millisecond)
+}
+
+// Current keeps each display's spaces in Mission Control order, fullscreen
+// ones included: the order Ctrl+Arrow steps through.
+func TestScreenKeepsEachDisplaysSpaceOrder(t *testing.T) {
+	r := &fakeReader{pic: testPicture()}
+	b, _, out := startScreen(t, r, CurrentChanged{})
+	expectEvent(t, out, CurrentChanged{}, time.Second) // startup
+	r.display = fsDisplay(300)
+	b.Publish(event.SpaceCreated{Stamp: event.Now(), Space: 300})
+	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
+	if got := pic.order["D1"]; !slices.Equal(got, []uint64{100, 200, 300}) || pic.fsSpace[300] != "D1" {
+		t.Fatalf("order %v, fullscreen spaces %v; want 100 200 300 with 300 fullscreen", got, pic.fsSpace)
 	}
 }

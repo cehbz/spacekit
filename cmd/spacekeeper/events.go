@@ -31,13 +31,23 @@ type CurrentChanged struct {
 	Current *snapshot
 }
 
-// WindowChanged is one window's new state in Current, or Gone.
+// WindowChanged is one window's new state in Current, or Gone: on Space,
+// fullscreen on the display Fullscreen names, or on neither while in transit.
 type WindowChanged struct {
 	event.Stamp
-	Window uint32
-	Space  uint64
-	Frame  layout.Rect
-	Gone   bool
+	Window     uint32
+	Space      uint64
+	Fullscreen string
+	Frame      layout.Rect
+	Gone       bool
+}
+
+// SpaceShown: a display now shows another space, as the space list read on
+// a space event reports it.
+type SpaceShown struct {
+	event.Stamp
+	Display string
+	Space   uint64
 }
 
 // Difference is one thing validation found Current had wrong.

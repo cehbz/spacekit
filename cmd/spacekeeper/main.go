@@ -166,6 +166,9 @@ type snapshot struct {
 	// fsWindow maps a window living in one to that display UUID.
 	fsSpace  map[uint64]string
 	fsWindow map[uint32]string
+	// order maps a display UUID to all its spaces, fullscreen ones included,
+	// in Mission Control order: the order Ctrl+Arrow steps through.
+	order map[string][]uint64
 }
 
 // windowManagerBundle is the system process whose windows (the Mission
@@ -203,12 +206,14 @@ func (s *snapshot) setSpaces(displays []skylight.Display) {
 	s.current = make(map[uint64]bool)
 	s.currentOf = make(map[string]uint64)
 	s.fsSpace = make(map[uint64]string)
+	s.order = make(map[string][]uint64)
 	for _, d := range displays {
 		cur := layout.CurrentDisplay{UUID: d.UUID}
 		s.current[d.CurrentSpace.ID()] = true
 		s.currentOf[d.UUID] = d.CurrentSpace.ID()
 		idx := 0
 		for _, sp := range d.Spaces {
+			s.order[d.UUID] = append(s.order[d.UUID], sp.ID())
 			if sp.UserSpace() {
 				key := spaceKey(sp.UUID, d.UUID, idx)
 				s.spaces = append(s.spaces, layout.SavedSpace{UUID: key, DisplayUUID: d.UUID, Index: idx})
@@ -375,6 +380,7 @@ func (s *snapshot) clone() *snapshot {
 		currentOf: make(map[string]uint64, len(s.currentOf)),
 		fsSpace:   make(map[uint64]string, len(s.fsSpace)),
 		fsWindow:  make(map[uint32]string, len(s.fsWindow)),
+		order:     make(map[string][]uint64, len(s.order)),
 	}
 	for i, d := range s.displays {
 		c.displays[i] = layout.CurrentDisplay{UUID: d.UUID, Spaces: append([]layout.CurrentSpace(nil), d.Spaces...)}
@@ -396,6 +402,9 @@ func (s *snapshot) clone() *snapshot {
 	}
 	for k, v := range s.fsWindow {
 		c.fsWindow[k] = v
+	}
+	for k, v := range s.order {
+		c.order[k] = append([]uint64(nil), v...)
 	}
 	return c
 }

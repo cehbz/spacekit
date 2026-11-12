@@ -161,7 +161,7 @@ func (s *screen) readOne(wid uint32) {
 		}
 		s.request()
 	}
-	s.publish(WindowChanged{Stamp: event.Now(), Window: wid, Space: s.pic.winSpace[wid], Frame: w.Frame})
+	s.publish(WindowChanged{Stamp: event.Now(), Window: wid, Space: s.pic.winSpace[wid], Fullscreen: s.pic.fsWindow[wid], Frame: w.Frame})
 }
 
 // transit takes a held window off its space between a detach and the attach
@@ -209,7 +209,8 @@ func (s *screen) remove(wid uint32, listed bool) {
 	s.publish(WindowChanged{Stamp: event.Now(), Window: wid, Gone: true})
 }
 
-// readSpaces rebuilds the space list in Current and publishes it.
+// readSpaces rebuilds the space list in Current and publishes it, then a
+// SpaceShown for each display that now shows another space.
 func (s *screen) readSpaces() {
 	var displays []skylight.Display
 	var err error
@@ -218,8 +219,19 @@ func (s *screen) readSpaces() {
 		log.Printf("screen: reading spaces failed: %v", err)
 		return
 	}
+	before := s.pic.currentOf
 	s.pic.setSpaces(displays)
 	s.b.Publish(CurrentChanged{Stamp: event.Now(), Current: s.pic.clone()})
+	disps := make([]string, 0, len(s.pic.currentOf))
+	for d := range s.pic.currentOf {
+		disps = append(disps, d)
+	}
+	sort.Strings(disps)
+	for _, d := range disps {
+		if sp := s.pic.currentOf[d]; sp != before[d] {
+			s.b.Publish(SpaceShown{Stamp: event.Now(), Display: d, Space: sp})
+		}
+	}
 }
 
 // publish emits Current, as a fresh copy, and then the change. Bus delivery
@@ -374,7 +386,7 @@ func (s *screen) put(w layout.LiveWindow, space uint64, fresh *snapshot) {
 		s.pic.all = append(s.pic.all, layout.ListedWindow{ID: w.ID, OwnerName: w.OwnerName, Title: w.Title})
 	}
 	s.request()
-	s.publish(WindowChanged{Stamp: event.Now(), Window: w.ID, Space: s.pic.winSpace[w.ID], Frame: w.Frame})
+	s.publish(WindowChanged{Stamp: event.Now(), Window: w.ID, Space: s.pic.winSpace[w.ID], Fullscreen: s.pic.fsWindow[w.ID], Frame: w.Frame})
 }
 
 // difference is one thing validation found Current had wrong: window names
