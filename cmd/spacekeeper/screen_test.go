@@ -28,6 +28,7 @@ type fakeReader struct {
 	// unlisted windows are omitted from the window list while their frame
 	// and spaces still read, as around an attach.
 	unlisted map[uint32]bool
+	visible  map[string]layout.Rect // each display's visible frame
 }
 
 func (f *fakeReader) readAll() (*snapshot, error) {
@@ -44,6 +45,12 @@ func (f *fakeReader) spaceList() ([]skylight.Display, error) {
 	}
 	return []skylight.Display{{UUID: "D1", CurrentSpace: skylight.Space{ManagedSpaceID: 100},
 		Spaces: []skylight.Space{{ManagedSpaceID: 100, UUID: "s1"}, {ManagedSpaceID: 200, UUID: "s2"}}}}, nil
+}
+func (f *fakeReader) visibleFrame(uuid string) (layout.Rect, error) {
+	if r, ok := f.visible[uuid]; ok {
+		return r, nil
+	}
+	return layout.Rect{}, errors.New("no screen")
 }
 func (f *fakeReader) window(wid uint32) (layout.LiveWindow, []uint64, error) {
 	f.reads = append(f.reads, wid)
@@ -615,5 +622,18 @@ func TestScreenKeepsEachDisplaysSpaceOrder(t *testing.T) {
 	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
 	if got := pic.order["D1"]; !slices.Equal(got, []uint64{100, 200, 300}) || pic.fsSpace[300] != "D1" {
 		t.Fatalf("order %v, fullscreen spaces %v; want 100 200 300 with 300 fullscreen", got, pic.fsSpace)
+	}
+}
+
+// The space relist fills each display's visible frame into Current.
+func TestReadSpacesFillsVisibleFrames(t *testing.T) {
+	vis := layout.Rect{X: 0, Y: 30, W: 2560, H: 1410}
+	r := &fakeReader{pic: testPicture(), visible: map[string]layout.Rect{"D1": vis}}
+	b, _, out := startScreen(t, r, CurrentChanged{})
+	expectEvent(t, out, CurrentChanged{}, time.Second) // startup
+	b.Publish(event.SpaceCreated{Stamp: event.Now(), Space: 300})
+	pic := expectEvent(t, out, CurrentChanged{}, time.Second).(CurrentChanged).Current
+	if got, ok := pic.visible("D1"); !ok || got != vis {
+		t.Fatalf("visible(D1) = %v, %v; want %v, true", got, ok, vis)
 	}
 }

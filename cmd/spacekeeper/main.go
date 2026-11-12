@@ -228,6 +228,33 @@ func (s *snapshot) setSpaces(displays []skylight.Display) {
 	}
 }
 
+// visible is the frame display's windows may occupy, false when Current
+// holds none for it.
+func (s *snapshot) visible(display string) (layout.Rect, bool) {
+	for _, d := range s.displays {
+		if d.UUID == display && d.Visible != (layout.Rect{}) {
+			return d.Visible, true
+		}
+	}
+	return layout.Rect{}, false
+}
+
+// fillVisible sets each display's visible frame from frame; a display frame
+// cannot answer for keeps none.
+func (s *snapshot) fillVisible(frame func(uuid string) (layout.Rect, error)) {
+	for i := range s.displays {
+		if r, err := frame(s.displays[i].UUID); err == nil {
+			s.displays[i].Visible = r
+		}
+	}
+}
+
+// liveVisibleFrame is fillVisible's source on the machine.
+func liveVisibleFrame(uuid string) (layout.Rect, error) {
+	x, y, w, h, err := skylight.DisplayVisibleFrame(uuid)
+	return layout.Rect{X: x, Y: y, W: w, H: h}, err
+}
+
 // readAll is the full read: every space, and every window with the space it
 // is on and its frame.
 func readAll() (*snapshot, error) {
@@ -244,6 +271,7 @@ func readAll() (*snapshot, error) {
 		fsWindow:  make(map[uint32]string),
 	}
 	s.setSpaces(displays)
+	s.fillVisible(liveVisibleFrame)
 
 	wins, err := skylight.WindowList()
 	if err != nil {
@@ -383,7 +411,7 @@ func (s *snapshot) clone() *snapshot {
 		order:     make(map[string][]uint64, len(s.order)),
 	}
 	for i, d := range s.displays {
-		c.displays[i] = layout.CurrentDisplay{UUID: d.UUID, Spaces: append([]layout.CurrentSpace(nil), d.Spaces...)}
+		c.displays[i] = layout.CurrentDisplay{UUID: d.UUID, Spaces: append([]layout.CurrentSpace(nil), d.Spaces...), Visible: d.Visible}
 	}
 	for k, v := range s.winSpace {
 		c.winSpace[k] = v

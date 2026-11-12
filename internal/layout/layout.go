@@ -40,9 +40,13 @@ type CurrentSpace struct {
 	UUID string
 }
 
+// CurrentDisplay is a display with the user spaces it has, in order, and the
+// frame its windows may occupy (under the menu bar, beside the Dock) in
+// window-server coordinates; Visible is zero when AppKit lists no screen for it.
 type CurrentDisplay struct {
-	UUID   string
-	Spaces []CurrentSpace
+	UUID    string
+	Spaces  []CurrentSpace
+	Visible Rect
 }
 
 // OverviewOpen reports whether Mission Control or App Exposé is showing.

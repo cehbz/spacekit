@@ -20,6 +20,7 @@ type reader interface {
 	readAll() (*snapshot, error)
 	window(wid uint32) (layout.LiveWindow, []uint64, error)
 	spaceList() ([]skylight.Display, error)
+	visibleFrame(uuid string) (layout.Rect, error)
 }
 
 type liveReader struct{}
@@ -27,6 +28,7 @@ type liveReader struct{}
 func (liveReader) readAll() (*snapshot, error)                            { return readAll() }
 func (liveReader) window(wid uint32) (layout.LiveWindow, []uint64, error) { return readWindow(wid) }
 func (liveReader) spaceList() ([]skylight.Display, error)                 { return skylight.ManagedDisplaySpaces() }
+func (liveReader) visibleFrame(uuid string) (layout.Rect, error)          { return liveVisibleFrame(uuid) }
 
 // screen keeps Current from the window server's events and publishes it by
 // value after every change. It owns the per-window request set, kept at
@@ -212,15 +214,20 @@ func (s *screen) remove(wid uint32, listed bool) {
 // readSpaces rebuilds the space list in Current and publishes it, then a
 // SpaceShown for each display that now shows another space.
 func (s *screen) readSpaces() {
+	before := s.pic.currentOf
 	var displays []skylight.Display
 	var err error
-	s.onMain(func() { displays, err = s.r.spaceList() })
+	s.onMain(func() {
+		displays, err = s.r.spaceList()
+		if err == nil {
+			s.pic.setSpaces(displays)
+			s.pic.fillVisible(s.r.visibleFrame)
+		}
+	})
 	if err != nil {
 		log.Printf("screen: reading spaces failed: %v", err)
 		return
 	}
-	before := s.pic.currentOf
-	s.pic.setSpaces(displays)
 	s.b.Publish(CurrentChanged{Stamp: event.Now(), Current: s.pic.clone()})
 	disps := make([]string, 0, len(s.pic.currentOf))
 	for d := range s.pic.currentOf {
