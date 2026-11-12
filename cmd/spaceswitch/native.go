@@ -1,36 +1,13 @@
 package main
 
 /*
+#cgo CFLAGS: -I${SRCDIR}/../../internal/spacekey
 #cgo LDFLAGS: -framework ApplicationServices -framework CoreFoundation
 #include <ApplicationServices/ApplicationServices.h>
 #include <stdio.h>
 
-// Mission Control ignores synthetic shortcuts posted to the session tap from
-// a session-state source. Building the event from the HID system state and
-// posting to the HID tap is the documented bypass (MacGesture fix). Physical
-// arrow keys carry the secondary-fn flag, so the synthetic ones do too.
-static const CGEventFlags kSpaceSwitchFlags = kCGEventFlagMaskControl | kCGEventFlagMaskSecondaryFn;
-
-static int post_ctrl_arrow(int right) {
-	CGEventSourceRef src = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
-	if (!src) return -1;
-	CGKeyCode key = right ? 124 : 123;
-	CGEventRef down = CGEventCreateKeyboardEvent(src, key, true);
-	CGEventRef up = CGEventCreateKeyboardEvent(src, key, false);
-	int rc = 0;
-	if (down && up) {
-		CGEventSetFlags(down, kSpaceSwitchFlags);
-		CGEventSetFlags(up, kSpaceSwitchFlags);
-		CGEventPost(kCGHIDEventTap, down);
-		CGEventPost(kCGHIDEventTap, up);
-	} else {
-		rc = -2;
-	}
-	if (down) CFRelease(down);
-	if (up) CFRelease(up);
-	CFRelease(src);
-	return rc;
-}
+// spacekey_post: the shared poster, also behind spacekey.Step.
+#include "post.h"
 
 static int ax_trusted(int prompt) {
 	if (!prompt) return AXIsProcessTrusted();
@@ -68,7 +45,7 @@ static CGEventRef tilt_callback(CGEventTapProxy proxy, CGEventType type, CGEvent
 
 	// CGEvent scroll deltas are positive for up/left, so h > 0 is tilt-left.
 	int right = (h < 0) ? !g_invert : g_invert;
-	post_ctrl_arrow(right);
+	spacekey_post(right);
 	return NULL; // consume the tilt so it doesn't also scroll horizontally
 }
 
@@ -87,17 +64,6 @@ static int run_daemon(int invert) {
 import "C"
 
 import "fmt"
-
-func postCtrlArrow(right bool) error {
-	r := C.int(0)
-	if right {
-		r = 1
-	}
-	if rc := C.post_ctrl_arrow(r); rc != 0 {
-		return fmt.Errorf("posting ctrl+arrow failed (rc=%d)", rc)
-	}
-	return nil
-}
 
 func axTrusted(prompt bool) bool {
 	p := C.int(0)

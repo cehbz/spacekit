@@ -174,6 +174,7 @@ char *sk_bundle_id_for_pid(int pid);
 // Implemented in ax.m.
 int sk_window_ax_frame(int pid, uint32_t wid, double *x, double *y, double *w, double *h);
 int sk_set_window_frame(int pid, uint32_t wid, double x, double y, double w, double h);
+int sk_set_window_fullscreen(int pid, uint32_t wid);
 CFDataRef sk_window_titles(int pid);
 */
 import "C"
@@ -387,6 +388,26 @@ func SetWindowFrame(pid int, wid uint32, x, y, w, h float64) error {
 		return errors.New("app refused the position/size change")
 	default:
 		return fmt.Errorf("set-frame failed (rc=%d)", int(rc))
+	}
+}
+
+// SetWindowFullscreen asks the window's app, through Accessibility, to take
+// the window fullscreen (AXFullScreen). macOS creates the fullscreen space on
+// the window's display, switches that display to it, and attaches the window
+// there about half a second later. Requires the process to be AX-trusted;
+// Chrome finds only windows on a shown space.
+func SetWindowFullscreen(pid int, wid uint32) error {
+	switch rc := C.sk_set_window_fullscreen(C.int(pid), C.uint32_t(wid)); rc {
+	case 0:
+		return nil
+	case 1:
+		return errors.New("Accessibility not permitted or app has no AX windows")
+	case 2:
+		return errors.New("window not found in its app's AX window list")
+	case 3:
+		return errors.New("app refused AXFullScreen")
+	default:
+		return fmt.Errorf("set-fullscreen failed (rc=%d)", int(rc))
 	}
 }
 

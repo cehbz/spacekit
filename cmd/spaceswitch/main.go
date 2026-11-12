@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cehbz/spacekit/internal/skylight"
+	"github.com/cehbz/spacekit/internal/spacekey"
 )
 
 func activeSpaceID() uint64 { return skylight.ActiveSpaceID() }
@@ -64,7 +65,7 @@ func switchSpace(right, verify bool) {
 		fmt.Fprintln(os.Stderr, "note: AXIsProcessTrusted reports false; the post may still land if the responsible process holds the Accessibility grant")
 	}
 	before := activeSpaceID()
-	if err := postCtrlArrow(right); err != nil {
+	if err := spacekey.Step(right); err != nil {
 		fatal(err.Error())
 	}
 	// A process that exits right after CGEventPost can lose the event
