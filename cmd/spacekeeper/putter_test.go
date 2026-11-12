@@ -3,6 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,12 +18,33 @@ import (
 type fakeOrders struct {
 	calls   chan string
 	moveErr error
+
+	mu         sync.Mutex
+	switchedOn []string // the display of each switchSpace, in order
 }
 
 func (f *fakeOrders) move(wids []uint32, space uint64) error { f.calls <- "move"; return f.moveErr }
 func (f *fakeOrders) setFrame(pid int, wid uint32, fr layout.Rect) error {
 	f.calls <- "frame"
 	return nil
+}
+func (f *fakeOrders) fullscreen(pid int, wid uint32) error { f.calls <- "fullscreen"; return nil }
+func (f *fakeOrders) switchSpace(display string, right bool) error {
+	f.mu.Lock()
+	f.switchedOn = append(f.switchedOn, display)
+	f.mu.Unlock()
+	if right {
+		f.calls <- "right"
+	} else {
+		f.calls <- "left"
+	}
+	return nil
+}
+
+func (f *fakeOrders) switchDisplays() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.switchedOn...)
 }
 
 // hiddenPut: window 2 on hidden space 200 (display D1 shows 100) wants
@@ -203,4 +227,258 @@ func TestPutDisplayRunCancelsAfterFailedOrders(t *testing.T) {
 		t.Fatalf("order %q after cancel", got)
 	case <-time.After(50 * time.Millisecond):
 	}
+}
+
+func noOrder(t *testing.T, o *fakeOrders, within time.Duration) {
+	t.Helper()
+	select {
+	case got := <-o.calls:
+		t.Fatalf("order %q, want none", got)
+	case <-time.After(within):
+	}
+}
+
+// fsPicture is twoWindows on D1, whose spaces are s1 (100), s2 (200) and
+// then the fullscreen spaces fs in order; D1 shows shown, and each of fsWin
+// is fullscreen on D1.
+func fsPicture(shown uint64, fs []uint64, fsWin ...uint32) *snapshot {
+	p := twoWindows()
+	p.order = map[string][]uint64{"D1": append([]uint64{100, 200}, fs...)}
+	for _, id := range fs {
+		p.fsSpace[id] = "D1"
+	}
+	p.current = map[uint64]bool{shown: true}
+	p.currentOf = map[string]uint64{"D1": shown}
+	for _, w := range fsWin {
+		delete(p.winSpace, w)
+		p.fsWindow[w] = "D1"
+	}
+	return p
+}
+
+// fullscreenPut asks for each of wids, in order, to be fullscreen on D1,
+// with Current p.
+func fullscreenPut(p *snapshot, wids ...uint32) PutWanted {
+	var ds []arrangement.Decision
+	for _, wid := range wids {
+		w, _ := p.window(wid)
+		ds = append(ds, arrangement.Decision{Kind: arrangement.Put, Window: int64(wid),
+			Seen: arrangement.Seen{Binding: wid, PID: w.OwnerPID, App: w.OwnerName, Title: w.Title,
+				Placement: arrangement.Placement{Space: p.idToKey[p.winSpace[wid]], Frame: w.Frame}},
+			Want: arrangement.FullscreenOn("D1"), Move: true})
+	}
+	return PutWanted{Stamp: event.Now(), Arr: 1, Current: p, Spaces: p.spaces, Decisions: ds}
+}
+
+// shows publishes Current p and D1 showing its shown space, as the screen
+// does after a space event.
+func shows(b *bus.Bus, p *snapshot) {
+	b.Publish(current(p))
+	b.Publish(SpaceShown{Stamp: event.Now(), Display: "D1", Space: p.currentOf["D1"]})
+}
+
+// attaches publishes Current p and window wid attached to D1's fullscreen
+// space, as the screen does after the attach event.
+func attaches(b *bus.Bus, p *snapshot, wid uint32) {
+	b.Publish(current(p))
+	b.Publish(WindowChanged{Stamp: event.Now(), Window: wid, Fullscreen: "D1"})
+}
+
+func stepNames(rep PutEnded) string {
+	var names []string
+	for _, s := range rep.Steps {
+		names = append(names, s.Name)
+	}
+	return strings.Join(names, " ")
+}
+
+// Window 2, on hidden s2, is staged to s1, which D1 shows; AXFullScreen is
+// set only once it is there; its attach to fullscreen space 300 and D1's
+// switch away confirm that; then D1 is stepped back 300 -> 200 -> 100, each
+// step confirmed by the switch.
+func TestPutFullscreenStagesSetsFullscreenAndReturnsTheDisplay(t *testing.T) {
+	b, o, out, cancel := startPutter(t, time.Second)
+	defer cancel()
+	b.Publish(fullscreenPut(fsPicture(100, nil), 2))
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "move")                 // stage to the space D1 shows
+	noOrder(t, o, 100*time.Millisecond) // AXFullScreen waits for the window to be there
+	b.Publish(changed(2, 100, layout.Rect{X: 10, Y: 10, W: 200, H: 200}))
+	order(t, o, "fullscreen")
+	shows(b, fsPicture(300, []uint64{300}, 2))
+	attaches(b, fsPicture(300, []uint64{300}, 2), 2)
+	order(t, o, "left")
+	shows(b, fsPicture(200, []uint64{300}, 2))
+	order(t, o, "left")
+	shows(b, fsPicture(100, []uint64{300}, 2))
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	if got := stepNames(rep); got != "stage fullscreen return return" || rep.Cancelled {
+		t.Fatalf("steps %q, cancelled %v; want stage fullscreen return return", got, rep.Cancelled)
+	}
+	for _, s := range rep.Steps {
+		if s.Confirmed == 0 || len(s.Unconfirmed)+len(s.Unswitched) > 0 {
+			t.Fatalf("step %+v, want it confirmed", s)
+		}
+	}
+	if got, want := o.switchDisplays(), []string{"D1", "D1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("switches ordered on %q, want %q", got, want)
+	}
+	noOrder(t, o, 50*time.Millisecond)
+}
+
+// Only the window's attach to a fullscreen space on the target display
+// confirms AXFullScreen: a change on the user space or fullscreen on another
+// display does not. Unconfirmed, with D1 still on 100, nothing is returned.
+func TestPutFullscreenIsConfirmedOnlyByTheAttachOnItsDisplay(t *testing.T) {
+	b, o, out, cancel := startPutter(t, 200*time.Millisecond)
+	defer cancel()
+	p := fsPicture(100, nil)
+	p.winSpace[2] = 100 // already on the space D1 shows: no stage
+	b.Publish(fullscreenPut(p, 2))
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "fullscreen")
+	b.Publish(changed(2, 100, layout.Rect{X: 10, Y: 10, W: 200, H: 200}))
+	b.Publish(WindowChanged{Stamp: event.Now(), Window: 2, Fullscreen: "D2"})
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	if len(rep.Steps) != 1 || rep.Steps[0].Name != "fullscreen" || rep.Steps[0].Confirmed != 0 || len(rep.Steps[0].Unconfirmed) != 1 {
+		t.Fatalf("report %+v, want one unconfirmed fullscreen step", rep)
+	}
+	noOrder(t, o, 50*time.Millisecond)
+}
+
+// The window may attach before the display's switch is reported: the return
+// waits for the switch.
+func TestPutFullscreenWaitsForTheDisplayToLeaveItsSpace(t *testing.T) {
+	b, o, out, cancel := startPutter(t, time.Second)
+	defer cancel()
+	p := fsPicture(100, nil)
+	p.winSpace[2] = 100
+	b.Publish(fullscreenPut(p, 2))
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "fullscreen")
+	attaches(b, fsPicture(100, []uint64{300}, 2), 2) // D1 not switched yet
+	noOrder(t, o, 100*time.Millisecond)
+	shows(b, fsPicture(300, []uint64{300}, 2))
+	order(t, o, "left")
+	shows(b, fsPicture(200, []uint64{300}, 2))
+	order(t, o, "left")
+	shows(b, fsPicture(100, []uint64{300}, 2))
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	if got := stepNames(rep); got != "fullscreen return return" {
+		t.Fatalf("steps %q, want fullscreen return return", got)
+	}
+}
+
+// A switch that lands elsewhere (the key acted on another display, or the
+// user switched) leaves the return unconfirmed, and no further key is posted.
+func TestPutReturnStopsWhenTheSwitchLandsElsewhere(t *testing.T) {
+	b, o, out, cancel := startPutter(t, 300*time.Millisecond)
+	defer cancel()
+	p := fsPicture(100, nil)
+	p.winSpace[2] = 100
+	b.Publish(fullscreenPut(p, 2))
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "fullscreen")
+	shows(b, fsPicture(300, []uint64{300}, 2))
+	attaches(b, fsPicture(300, []uint64{300}, 2), 2)
+	order(t, o, "left")
+	b.Publish(SpaceShown{Stamp: event.Now(), Display: "D2", Space: 900})
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	last := rep.Steps[len(rep.Steps)-1]
+	if stepNames(rep) != "fullscreen return" || last.Confirmed != 0 || len(last.Unswitched) != 1 || last.Unswitched[0] != "D1" {
+		t.Fatalf("report %+v, want the return unconfirmed for D1", rep)
+	}
+	noOrder(t, o, 50*time.Millisecond)
+}
+
+// Two windows wanting fullscreen on D1 are put one after the other: the
+// second is staged and made fullscreen only once D1 is back on 100.
+func TestPutTwoFullscreenWindowsOnOneDisplayOneAfterTheOther(t *testing.T) {
+	b, o, out, cancel := startPutter(t, time.Second)
+	defer cancel()
+	b.Publish(fullscreenPut(fsPicture(100, nil), 1, 2)) // 1 on s1, shown; 2 on s2
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "fullscreen") // window 1: already on the shown space
+	shows(b, fsPicture(300, []uint64{300}, 1))
+	attaches(b, fsPicture(300, []uint64{300}, 1), 1)
+	for _, at := range []uint64{200, 100} {
+		order(t, o, "left")
+		shows(b, fsPicture(at, []uint64{300}, 1))
+	}
+	order(t, o, "move") // window 2 is staged only now
+	b.Publish(changed(2, 100, layout.Rect{X: 10, Y: 10, W: 200, H: 200}))
+	order(t, o, "fullscreen")
+	shows(b, fsPicture(400, []uint64{300, 400}, 1, 2))
+	attaches(b, fsPicture(400, []uint64{300, 400}, 1, 2), 2)
+	for _, at := range []uint64{300, 200, 100} {
+		order(t, o, "left")
+		shows(b, fsPicture(at, []uint64{300, 400}, 1, 2))
+	}
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	if got := stepNames(rep); got != "fullscreen return return stage fullscreen return return return" {
+		t.Fatalf("steps %q", got)
+	}
+}
+
+// The first window's return is left unconfirmed, so D1 stays on its
+// fullscreen space: the second window, planned from that Current, has no
+// space to be staged to and fails without an order.
+func TestPutSecondFullscreenWindowFailsWhenTheDisplayWasNotReturned(t *testing.T) {
+	b, o, out, cancel := startPutter(t, 200*time.Millisecond)
+	defer cancel()
+	b.Publish(fullscreenPut(fsPicture(100, nil), 1, 2))
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "fullscreen")
+	shows(b, fsPicture(300, []uint64{300}, 1))
+	attaches(b, fsPicture(300, []uint64{300}, 1), 1)
+	order(t, o, "left") // never confirmed: D1 stays on 300
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	last := rep.Steps[len(rep.Steps)-1]
+	if got := stepNames(rep); got != "fullscreen return fullscreen" || len(last.Unconfirmed) != 1 || last.Unconfirmed[0] != 2 {
+		t.Fatalf("report %+v (steps %q), want window 2's fullscreen failed after the unconfirmed return", rep, got)
+	}
+	noOrder(t, o, 50*time.Millisecond)
+}
+
+// A return toward a space Current's order no longer lists is a failed
+// return: D1 is reported unswitched and no key is posted.
+func TestPutReturnTowardASpaceMissingFromTheOrderFails(t *testing.T) {
+	b, o, out, cancel := startPutter(t, time.Second)
+	defer cancel()
+	p := fsPicture(100, nil)
+	p.winSpace[2] = 100
+	b.Publish(fullscreenPut(p, 2))
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "fullscreen")
+	after := fsPicture(300, []uint64{300}, 2)
+	after.order["D1"] = []uint64{200, 300} // 100 gone
+	shows(b, after)
+	attaches(b, after, 2)
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	last := rep.Steps[len(rep.Steps)-1]
+	if got := stepNames(rep); got != "fullscreen return" || len(last.Unswitched) != 1 || last.Unswitched[0] != "D1" {
+		t.Fatalf("report %+v (steps %q), want the return unswitched for D1", rep, got)
+	}
+	if !strings.Contains(rep.String(), "1 unconfirmed") {
+		t.Fatalf("report line %q, want the return counted unconfirmed", rep.String())
+	}
+	noOrder(t, o, 50*time.Millisecond)
+}
+
+// With neither the attach nor the switch confirmed, D1 still shows the space
+// it showed when the put began: no key is posted and the window is reported
+// unconfirmed.
+func TestPutNoReturnWhenTheDisplayDidNotMove(t *testing.T) {
+	b, o, out, cancel := startPutter(t, 100*time.Millisecond)
+	defer cancel()
+	p := fsPicture(100, nil)
+	p.winSpace[2] = 100
+	b.Publish(fullscreenPut(p, 2))
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "fullscreen")
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	if got := stepNames(rep); got != "fullscreen" || len(rep.Steps[0].Unconfirmed) != 1 || rep.Steps[0].Unconfirmed[0] != 2 {
+		t.Fatalf("report %+v (steps %q), want window 2 unconfirmed and no return", rep, got)
+	}
+	noOrder(t, o, 50*time.Millisecond)
 }

@@ -84,6 +84,7 @@ type PutStep struct {
 	Took        time.Duration
 	Confirmed   int
 	Unconfirmed []uint32
+	Unswitched  []string // displays the step's space switch did not reach
 }
 
 type PutEnded struct {
@@ -96,8 +97,8 @@ func (p PutEnded) String() string {
 	var parts []string
 	for _, s := range p.Steps {
 		part := fmt.Sprintf("%s %d confirmed in %s", s.Name, s.Confirmed, s.Took.Round(time.Millisecond))
-		if len(s.Unconfirmed) > 0 {
-			part += fmt.Sprintf(", %d unconfirmed", len(s.Unconfirmed))
+		if n := len(s.Unconfirmed) + len(s.Unswitched); n > 0 {
+			part += fmt.Sprintf(", %d unconfirmed", n)
 		}
 		parts = append(parts, part)
 	}

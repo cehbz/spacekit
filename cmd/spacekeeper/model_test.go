@@ -886,10 +886,17 @@ func TestModelUserEnteringAndLeavingFullscreenMovesTheTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	found := false
 	for _, r := range rs {
-		if r.Binding == 1 && r.Placement != landed {
-			t.Fatalf("window 1 target %+v, want %+v", r.Placement, landed)
+		if r.Binding == 1 {
+			found = true
+			if r.Placement != landed {
+				t.Fatalf("window 1 target %+v, want %+v", r.Placement, landed)
+			}
 		}
+	}
+	if !found {
+		t.Fatalf("no record for binding 1")
 	}
 }
 
@@ -924,5 +931,69 @@ func TestModelFullscreenWindowOffTargetIsAFailedPut(t *testing.T) {
 	ds, put := decideOf(t, out, 3)
 	if ks := kindsOf(ds); len(ks) != 2 || ks[0] != arrangement.Dirty || ks[1] != arrangement.Failed || put != nil {
 		t.Fatalf("window 3: %v, put wanted %v; want dirty, failed and no put", ks, put != nil)
+	}
+}
+
+// After a reboot a window whose target is fullscreen on D1 comes back as a
+// normal window: bound by title, it is put, unless D1 shows a fullscreen
+// space, where nothing can be staged: then it is a failed put.
+func TestModelFullscreenTargetIsPutOntoADisplayShowingAUserSpace(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		shown uint64
+		want  arrangement.Kind
+	}{
+		{"D1 shows a user space", 100, arrangement.Put},
+		{"D1 shows another fullscreen space", 400, arrangement.Failed},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			after := withNormal(twoWindows(), 13, "three")
+			after.fsSpace[400] = "D1"
+			after.currentOf["D1"] = c.shown
+			after.current = map[uint64]bool{c.shown: true}
+			_, out := fullscreenBoot(t, tempStore(t), after)
+			ds, put := decideOf(t, out, 13)
+			if len(ds) != 1 || ds[0].Kind != c.want || ds[0].Want != arrangement.FullscreenOn("D1") {
+				t.Fatalf("window 13: %+v, want %v toward fullscreen on D1", ds, c.want)
+			}
+			if wantPut := c.want == arrangement.Put; (put != nil) != wantPut {
+				t.Fatalf("put wanted %v, want %v", put != nil, wantPut)
+			}
+			if put != nil && (len(put.Decisions) != 1 || !put.Decisions[0].Move || put.Decisions[0].Want != arrangement.FullscreenOn("D1")) {
+				t.Fatalf("put wanted %+v, want window 13 moved to fullscreen on D1", put.Decisions)
+			}
+		})
+	}
+}
+
+// A fullscreen put the window never confirms is a failed put once: the
+// target stays fullscreen on D1 and the window stays dirty.
+func TestModelFailedFullscreenPutKeepsTheTarget(t *testing.T) {
+	st := tempStore(t)
+	b, out := fullscreenBoot(t, st, withNormal(twoWindows(), 13, "three"))
+	if _, put := decideOf(t, out, 13); put == nil {
+		t.Fatal("no put wanted for window 13")
+	}
+	b.Publish(PutEnded{Stamp: event.Now()}) // no attach: Current unchanged
+	ds, put := decideOf(t, out, 13)
+	if len(ds) != 1 || ds[0].Kind != arrangement.Failed || ds[0].Want != arrangement.FullscreenOn("D1") || put != nil {
+		t.Fatalf("after the put: %+v, put wanted %v; want one failed put toward fullscreen on D1", ds, put != nil)
+	}
+	expectNone(t, out, 100*time.Millisecond)
+	rs, err := st.Recorded(mustArr(t, st, displaySet(twoWindows().spaces)), time.Date(2026, 11, 8, 7, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range rs {
+		if r.Binding == 13 {
+			found = true
+			if r.Placement != arrangement.FullscreenOn("D1") || !r.Dirty {
+				t.Fatalf("window 13 record %+v, want fullscreen on D1 and still dirty", r)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no record for binding 13")
 	}
 }

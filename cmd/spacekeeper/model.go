@@ -303,11 +303,16 @@ func (m *model) decide(cause string, only []uint32, system bool, also map[uint32
 
 // orderable reports whether the putter can carry out a put: the window is on
 // a user space, since no put takes a window out of fullscreen, and its target
-// is a space that resolves in Current. A fullscreen target is not orderable
-// yet.
+// is a space that resolves in Current, or fullscreen on a display that shows
+// a user space for the window to be staged to.
 func (m *model) orderable(d arrangement.Decision, resolved map[string]uint64) bool {
-	if d.Seen.Fullscreen != "" || d.Want.Fullscreen != "" {
+	if d.Seen.Fullscreen != "" {
 		return false
+	}
+	if d.Want.Fullscreen != "" {
+		shown, present := m.pic.currentOf[d.Want.Fullscreen]
+		_, user := m.pic.idToKey[shown]
+		return present && user
 	}
 	_, ok := resolved[d.Want.Space]
 	return ok
