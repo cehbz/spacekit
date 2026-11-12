@@ -67,20 +67,37 @@ func displaySet(spaces []layout.SavedSpace) string {
 	return strings.Join(ids, ",")
 }
 
-// seenWindows are the snapshot's windows on user desktops; fullscreen
-// windows and windows in transit between spaces are not placed.
+// seenWindows are the snapshot's windows a decide sees: each on a user
+// desktop at its frame, and each titled window fullscreen on a display. An
+// untitled fullscreen window (a transition's transient, Chrome's toolbar
+// strip) could never be bound, so it is not seen and never recorded; nor is
+// a window in transit between spaces.
 func seenWindows(s *snapshot) []arrangement.Seen {
 	out := make([]arrangement.Seen, 0, len(s.windows))
 	for _, l := range s.windows {
-		if _, placed := s.winSpace[l.ID]; !placed {
+		var p arrangement.Placement
+		if sp, placed := s.winSpace[l.ID]; placed {
+			p = arrangement.Placement{Space: s.idToKey[sp], Frame: l.Frame}
+		} else if d, fs := s.fsWindow[l.ID]; fs && l.Title != "" {
+			p = arrangement.FullscreenOn(d)
+		} else {
 			continue
 		}
 		out = append(out, arrangement.Seen{
-			Binding: l.ID, PID: l.OwnerPID, Bundle: l.BundleID, App: l.OwnerName, Title: l.Title,
-			Placement: arrangement.Placement{Space: s.idToKey[s.winSpace[l.ID]], Frame: l.Frame},
+			Binding: l.ID, PID: l.OwnerPID, Bundle: l.BundleID, App: l.OwnerName, Title: l.Title, Placement: p,
 		})
 	}
 	return out
+}
+
+// placementText is a placement as the logs and inspect show it: the space
+// key's first eight characters and the frame, or fullscreen@ and the
+// display's first eight.
+func placementText(p arrangement.Placement) string {
+	if p.Fullscreen != "" {
+		return fmt.Sprintf("fullscreen@%.8s", p.Fullscreen)
+	}
+	return fmt.Sprintf("%.8s %.0f,%.0f %.0fx%.0f", p.Space, p.Frame.X, p.Frame.Y, p.Frame.W, p.Frame.H)
 }
 
 // logDecisions writes one line per decide that did something, and one line
@@ -118,9 +135,7 @@ func logDecisions(cause string, ds []arrangement.Decision) {
 			}
 		case arrangement.Failed:
 			failed++
-			f, w := d.Seen.Frame, d.Want.Frame
-			log.Printf("put failed: %s at %.0f,%.0f %.0fx%.0f on %.8s; target %.0f,%.0f %.0fx%.0f on %.8s",
-				name(d.Seen), f.X, f.Y, f.W, f.H, d.Seen.Space, w.X, w.Y, w.W, w.H, d.Want.Space)
+			log.Printf("put failed: %s at %s; target %s", name(d.Seen), placementText(d.Seen.Placement), placementText(d.Want))
 		}
 	}
 	if adopted+dirty+put+clean+failed == 0 {

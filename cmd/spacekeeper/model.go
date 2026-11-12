@@ -270,9 +270,9 @@ func (m *model) decide(cause string, only []uint32, system bool, also map[uint32
 		if d.Kind != arrangement.Put {
 			continue
 		}
-		if _, ok := resolved[d.Want.Space]; !ok {
-			// the space is gone: nothing to order; a failed put, so the mark
-			// records an attempt and a user move adopts it
+		if !m.orderable(*d, resolved) {
+			// nothing to order: a failed put, so the mark records an attempt
+			// and a user move adopts it
 			d.Kind, d.Move, d.Resize = arrangement.Failed, false, false
 			continue
 		}
@@ -299,6 +299,18 @@ func (m *model) decide(cause string, only []uint32, system bool, also map[uint32
 		}
 		m.b.Publish(PutWanted{Stamp: event.Now(), Arr: arr, Current: m.pic.clone(), Spaces: saved, Decisions: puts})
 	}
+}
+
+// orderable reports whether the putter can carry out a put: the window is on
+// a user space, since no put takes a window out of fullscreen, and its target
+// is a space that resolves in Current. A fullscreen target is not orderable
+// yet.
+func (m *model) orderable(d arrangement.Decision, resolved map[string]uint64) bool {
+	if d.Seen.Fullscreen != "" || d.Want.Fullscreen != "" {
+		return false
+	}
+	_, ok := resolved[d.Want.Space]
+	return ok
 }
 
 // rebind binds every seen window no record of this boot claims to the record

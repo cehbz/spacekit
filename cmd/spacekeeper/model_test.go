@@ -786,3 +786,143 @@ func TestModelTickDuringAHoldRecordsNoArrangement(t *testing.T) {
 		t.Fatalf("probe arrangements %d then %d: the held tick recorded an arrangement", before, after)
 	}
 }
+
+// tidalFrame is the frame a fullscreen window keeps from before fullscreen.
+var tidalFrame = layout.Rect{X: 100, Y: 283, W: 1470, H: 923}
+
+// withFullscreen adds window wid, titled title, to p fullscreen on D1, in
+// the fullscreen space 300, which D1 does not show.
+func withFullscreen(p *snapshot, wid uint32, title string) *snapshot {
+	p.fsSpace[300] = "D1"
+	p.fsWindow[wid] = "D1"
+	p.windows = append(p.windows, layout.LiveWindow{ID: wid, OwnerPID: 12, OwnerName: "T", BundleID: "t.app", Title: title, Frame: tidalFrame})
+	p.all = append(p.all, layout.ListedWindow{ID: wid, OwnerName: "T", Title: title})
+	return p
+}
+
+// withNormal adds window wid, titled title, to p on s1 (100) at tidalFrame.
+func withNormal(p *snapshot, wid uint32, title string) *snapshot {
+	p.winSpace[wid] = 100
+	p.windows = append(p.windows, layout.LiveWindow{ID: wid, OwnerPID: 12, OwnerName: "T", BundleID: "t.app", Title: title, Frame: tidalFrame})
+	p.all = append(p.all, layout.ListedWindow{ID: wid, OwnerName: "T", Title: title})
+	return p
+}
+
+// fullscreenBoot runs boot 1 (Nov 7) on st with window 3, "three",
+// fullscreen on D1, then boot 2 (Nov 8) on the same store, publishing after
+// as its first Current. It returns boot 2's bus and subscription.
+func fullscreenBoot(t *testing.T, st *store.Store, after *snapshot) (*bus.Bus, *bus.Subscription) {
+	t.Helper()
+	b1, out1 := restartModel(t, st, 7)
+	b1.Publish(current(withFullscreen(twoWindows(), 3, "three")))
+	decisionsOf(t, out1, 3)
+	b1.Close()
+	b2, out2 := restartModel(t, st, 8)
+	b2.Publish(current(after))
+	return b2, out2
+}
+
+// decideOf collects the decisions about window wid from the next decide that
+// has any, and a PutWanted published within 200 ms of them; put is nil when
+// none came.
+func decideOf(t *testing.T, out *bus.Subscription, wid uint32) (ds []arrangement.Decision, put *PutWanted) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	var settle <-chan time.Time
+	for {
+		select {
+		case e := <-out.C():
+			switch e := e.(type) {
+			case TargetChanged:
+				for _, d := range e.Decisions {
+					if d.Seen.Binding == wid {
+						ds = append(ds, d)
+					}
+				}
+				if len(ds) > 0 && settle == nil {
+					settle = time.After(200 * time.Millisecond)
+				}
+			case PutWanted:
+				p := e
+				put = &p
+			}
+		case <-settle:
+			return ds, put
+		case <-deadline:
+			t.Fatalf("no decision about window %d", wid)
+			return nil, nil
+		}
+	}
+}
+
+// Entering fullscreen by hand is the user's: the target becomes fullscreen
+// on the window's display. Leaving it by hand makes the target the space and
+// frame the window lands on.
+func TestModelUserEnteringAndLeavingFullscreenMovesTheTarget(t *testing.T) {
+	st := tempStore(t)
+	b, out := startModelWith(t, st, displayGrace)
+	b.Publish(current(twoWindows()))
+	decisionsOf(t, out, 2)
+	entered := twoWindows()
+	delete(entered.winSpace, 1)
+	entered.fsSpace[300] = "D1"
+	entered.fsWindow[1] = "D1"
+	b.Publish(current(entered))
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1})
+	ds := decisionsOf(t, out, 1)
+	if d := ds[0]; d.Kind != arrangement.Adopt || d.Seen.Placement != arrangement.FullscreenOn("D1") {
+		t.Fatalf("entering fullscreen: %+v, want the target to become fullscreen on D1", d)
+	}
+	landed := arrangement.Placement{Space: "s1", Frame: layout.Rect{X: 40, Y: 40, W: 100, H: 100}}
+	left := twoWindows()
+	left.windows[0].Frame = landed.Frame
+	b.Publish(current(left))
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 1})
+	ds = decisionsOf(t, out, 1)
+	if d := ds[0]; d.Kind != arrangement.Adopt || d.Seen.Placement != landed {
+		t.Fatalf("leaving fullscreen: %+v, want the target to follow to s1", d)
+	}
+	rs, err := st.Recorded(mustArr(t, st, displaySet(left.spaces)), bootTime())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range rs {
+		if r.Binding == 1 && r.Placement != landed {
+			t.Fatalf("window 1 target %+v, want %+v", r.Placement, landed)
+		}
+	}
+}
+
+// A window fullscreen on D1 that comes back fullscreen on D1 after a reboot
+// binds to its record on its title alone and is clean: nothing is put.
+func TestModelReappearedFullscreenWindowBindsByTitleAndIsClean(t *testing.T) {
+	st := tempStore(t)
+	_, out := fullscreenBoot(t, st, withFullscreen(twoWindows(), 13, "three"))
+	ds, put := decideOf(t, out, 13)
+	if len(ds) != 1 || ds[0].Kind != arrangement.Clean || put != nil {
+		t.Fatalf("window 13: %v, put wanted %v; want clean and no put", kindsOf(ds), put != nil)
+	}
+	was, err := st.WindowByBinding(time.Date(2026, 11, 7, 7, 0, 0, 0, time.UTC), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now, err := st.WindowByBinding(time.Date(2026, 11, 8, 7, 0, 0, 0, time.UTC), 13)
+	if err != nil || was == 0 || now != was {
+		t.Fatalf("window 13 bound to record %d (%v), want window 3's record %d", now, err, was)
+	}
+}
+
+// No put takes a window out of fullscreen: a fullscreen window off its
+// target for a system cause is a failed put, and nothing is ordered.
+func TestModelFullscreenWindowOffTargetIsAFailedPut(t *testing.T) {
+	b, out := startModel(t)
+	b.Publish(current(withNormal(twoWindows(), 3, "three")))
+	decisionsOf(t, out, 3)
+	b.Publish(DisplayBurstBegan{Stamp: event.Now()})
+	b.Publish(current(withFullscreen(twoWindows(), 3, "three")))
+	b.Publish(DisplayQuiet{Stamp: event.Now()})
+	ds, put := decideOf(t, out, 3)
+	if ks := kindsOf(ds); len(ks) != 2 || ks[0] != arrangement.Dirty || ks[1] != arrangement.Failed || put != nil {
+		t.Fatalf("window 3: %v, put wanted %v; want dirty, failed and no put", ks, put != nil)
+	}
+}
