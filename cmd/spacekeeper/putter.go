@@ -105,6 +105,9 @@ type step struct {
 	name   string
 	issue  func(o orders, cur *snapshot) wants
 	repeat bool
+	// required: a step the next ones build on; when it is not confirmed in
+	// full, the sequence ends there and the put reports what it has.
+	required bool
 }
 
 // putter carries out put requests one at a time as sequential steps, each
@@ -227,26 +230,50 @@ func plan(req PutWanted) (steps []step, fullscreens []arrangement.Decision) {
 
 // fullscreenSteps take one window fullscreen on its target display: staged
 // to the space the display shows when it is elsewhere (Chrome's
-// Accessibility reaches only windows on a shown space), AXFullScreen set and
-// confirmed by the window's attach to a fullscreen space on that display and
-// the display's switch away from the shown space, then the display stepped
-// back to that space. A display showing no user space (an earlier window's
-// return failed) has nowhere to stage to: the window fails without an order.
+// Accessibility reaches only windows on a shown space), then given that
+// display's visible frame, since AXFullScreen set before the app has placed
+// the window on the new display builds the transition on the old one;
+// AXFullScreen set and confirmed by the window's attach to a fullscreen
+// space on that display and the display's switch away from the shown
+// space, then the display stepped back to that space. A window Current
+// already reports at the visible frame is not framed. The stage and the
+// frame are required steps: either left unconfirmed ends the window's
+// sequence there, with no AXFullScreen. A display showing no user space (an
+// earlier window's return failed), or one Current holds no visible frame
+// for, has nowhere to stage to: the window fails without an order.
 func fullscreenSteps(cur *snapshot, d arrangement.Decision) []step {
-	display, wid := d.Want.Fullscreen, d.Seen.Binding
+	display, wid, pid := d.Want.Fullscreen, d.Seen.Binding, d.Seen.PID
 	shown := cur.currentOf[display]
-	if _, user := cur.idToKey[shown]; !user {
-		return []step{{name: "fullscreen", issue: func(orders, *snapshot) wants {
+	unplaced := func(name string) []step {
+		return []step{{name: name, issue: func(orders, *snapshot) wants {
 			return wants{unplaced: []uint32{wid}}
 		}}}
 	}
+	if _, user := cur.idToKey[shown]; !user {
+		return unplaced("fullscreen")
+	}
 	var steps []step
 	if cur.winSpace[wid] != shown {
-		steps = append(steps, step{name: "stage", issue: moves(map[uint64][]uint32{shown: {wid}})})
+		vis, ok := cur.visible(display)
+		if !ok {
+			return unplaced("frame")
+		}
+		steps = append(steps,
+			step{name: "stage", issue: moves(map[uint64][]uint32{shown: {wid}}), required: true},
+			step{name: "frame", required: true, issue: func(o orders, cur *snapshot) wants {
+				if w, ok := cur.window(wid); ok && arrangement.SameFrame(w.Frame, vis) {
+					return wants{}
+				}
+				if err := o.setFrame(pid, wid, vis); err != nil {
+					log.Printf("framing window %d on display %.8s: %v", wid, display, err)
+					return wants{unplaced: []uint32{wid}}
+				}
+				return wants{windows: map[uint32]target{wid: {frame: &vis}}}
+			}})
 	}
 	return append(steps,
 		step{name: "fullscreen", issue: func(o orders, _ *snapshot) wants {
-			if err := o.fullscreen(d.Seen.PID, wid); err != nil {
+			if err := o.fullscreen(pid, wid); err != nil {
 				log.Printf("making window %d fullscreen: %v", wid, err)
 				return wants{unplaced: []uint32{wid}}
 			}
@@ -329,7 +356,7 @@ func (p *putter) runSteps(ctx context.Context, steps []step, rep *PutEnded) {
 			}
 			res := p.await(ctx, s.name, want, rep)
 			rep.Steps = append(rep.Steps, res)
-			if rep.Cancelled {
+			if rep.Cancelled || (s.required && len(res.Unconfirmed)+len(res.Unswitched) > 0) {
 				return
 			}
 			if !s.repeat || res.Confirmed == 0 || len(res.Unconfirmed)+len(res.Unswitched) > 0 {
