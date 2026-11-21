@@ -149,17 +149,17 @@ func TestAdoptAgainClosesTheOldVersion(t *testing.T) {
 	}
 }
 
-func TestRecordedIsScopedToBootAndArrangement(t *testing.T) {
+func TestRecordedIsScopedToLoginSessionAndArrangement(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1,D2", "S1")
 	adoptNew(t, s, arr, 42, "S1", full)
 	if rs, _ := s.Recorded(arr, boot.Add(time.Hour)); len(rs) != 0 {
-		t.Fatalf("another boot has no bindings: %+v", rs)
+		t.Fatalf("another login session has no bindings: %+v", rs)
 	}
 	other, _ := s.Arrangement("D2")
 	rs, _ := s.Recorded(other, boot)
 	if len(rs) != 1 || rs[0].Placed {
-		t.Fatalf("bound this boot but not placed in the other arrangement: %+v", rs)
+		t.Fatalf("bound this login session but not placed in the other arrangement: %+v", rs)
 	}
 }
 
@@ -287,7 +287,7 @@ func TestAdoptOfADirtyWindowCleansIt(t *testing.T) {
 	}
 }
 
-func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
+func TestOweAllOwesPlacedWindowsOfThisLoginSessionAndResetsProgress(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	a := adoptNew(t, s, arr, 1, "S1", full)
@@ -310,11 +310,11 @@ func TestOweAllOwesPlacedWindowsOfThisBootAndResetsProgress(t *testing.T) {
 		}
 	}
 	if n, _ := s.OweAll(arr, boot.Add(time.Hour), t0, "display change", []uint32{1, 2}); n != 0 {
-		t.Fatalf("another boot has nothing bound: %d", n)
+		t.Fatalf("another login session has nothing bound: %d", n)
 	}
 }
 
-func TestDirtyUntriedListsThisBootsMarkedWindows(t *testing.T) {
+func TestDirtyUntriedListsThisLoginSessionsMarkedWindows(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	adoptNew(t, s, arr, 1, "S1", full)
@@ -335,7 +335,7 @@ func TestDirtyUntriedListsThisBootsMarkedWindows(t *testing.T) {
 		t.Fatalf("DirtyUntried = %v, %v; want [1]", ids, err)
 	}
 	if ids, _ := s.DirtyUntried(arr, boot.Add(time.Hour)); len(ids) != 0 {
-		t.Fatalf("another boot has nothing bound: %v", ids)
+		t.Fatalf("another login session has nothing bound: %v", ids)
 	}
 }
 
@@ -597,7 +597,7 @@ func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 	old := t0.Add(-100 * 24 * time.Hour)
 	oldBoot := boot.Add(-100 * 24 * time.Hour)
 
-	// A window of this boot with one stale version and a current one.
+	// A window of this login session with one stale version and a current one.
 	if err := s.Apply(arr, boot, old, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(1, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +605,7 @@ func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 	if err := s.Apply(arr, boot, old.Add(time.Hour), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: live.Window, Seen: seen(1, "S2", half)}}); err != nil {
 		t.Fatal(err)
 	}
-	// A window last bound in a boot long ago.
+	// A window last bound in a login session long ago.
 	if err := s.Apply(arr, oldBoot, old, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(2, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
@@ -635,8 +635,8 @@ func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 }
 
 // A window closed since it was recorded has nothing that could clean it,
-// and a window recreated under a fresh id has two bindings in the boot: only
-// windows on screen are marked dirty, each once.
+// and a window recreated under a fresh id has two bindings in the login
+// session: only windows on screen are marked dirty, each once.
 func TestOweAllOwesOnlyWindowsOnScreenEachOnce(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1")
@@ -913,7 +913,7 @@ func TestHistoryListsAWindowsDecisionsInOrder(t *testing.T) {
 }
 
 // A window record carries its app, title, current targets with their dirty
-// marks, and the boots and ids it has been bound under.
+// marks, and the login sessions and ids it has been bound under.
 func TestWindowRecordCarriesTargetsAndBindings(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1")
@@ -952,7 +952,7 @@ func seenAs(wid uint32, p arrangement.Placement) arrangement.Seen {
 	return s
 }
 
-// adoptAt records that window win (wid in this boot) is now at p.
+// adoptAt records that window win (wid in this login session) is now at p.
 func adoptAt(t *testing.T, s *Store, arr int64, at time.Time, win int64, wid uint32, p arrangement.Placement) {
 	t.Helper()
 	if err := s.Apply(arr, boot, at, "window settled", []arrangement.Decision{{Kind: arrangement.Adopt, Window: win, Seen: seenAs(wid, p)}}); err != nil {

@@ -376,11 +376,12 @@ func kindsOf(ds []arrangement.Decision) []arrangement.Kind {
 	return out
 }
 
-// A boot: the same windows under new ids, in a fresh "boot" the store has no
-// bindings for. Window 2 comes back as 12 with its title, at the wrong frame
-// and space; window 1 as 11 with its frame, on the wrong space; 13 is new.
+// A login session: the same windows under new ids, in a fresh login session
+// the store has no bindings for. Window 2 comes back as 12 with its title, at
+// the wrong frame and space; window 1 as 11 with its frame, on the wrong
+// space; 13 is new.
 // A reappearance is a system cause: the bound windows are put back.
-func TestModelBootBindsByEvidenceAndPuts(t *testing.T) {
+func TestModelLoginBindsByEvidenceAndPuts(t *testing.T) {
 	st := tempStore(t)
 	b := bus.New()
 	out := b.Subscribe("t", TargetChanged{}, PutWanted{})
@@ -490,8 +491,8 @@ func TestModelStartupDropsEarlierCause(t *testing.T) {
 	expectNone(t, out, 100*time.Millisecond)
 }
 
-// restartModel runs a model on st for the boot at that day of November 2026,
-// on its own bus.
+// restartModel runs a model on st for the login session begun at that day of
+// November 2026, on its own bus.
 func restartModel(t *testing.T, st *store.Store, day int) (*bus.Bus, *bus.Subscription) {
 	b := bus.New()
 	out := b.Subscribe("t", TargetChanged{}, PutWanted{})
@@ -594,11 +595,11 @@ func mustArr(t *testing.T, st *store.Store, set string) int64 {
 	return arr
 }
 
-// Boot 1 with two displays adopts Chrome on D2. Boot 2 on the laptop alone
-// restores Chrome under a new id at the laptop's default frame: it binds to
-// its record (the same window row) and takes a laptop placement. D2
-// returning then puts it back at the recorded dual frame.
-func TestModelLaptopBootBindsDualOnlyRecordAndDualReturnPutsItBack(t *testing.T) {
+// Login session 1 with two displays adopts Chrome on D2. Login session 2 on
+// the laptop alone restores Chrome under a new id at the laptop's default
+// frame: it binds to its record (the same window row) and takes a laptop
+// placement. D2 returning then puts it back at the recorded dual frame.
+func TestModelLaptopLoginBindsDualOnlyRecordAndDualReturnPutsItBack(t *testing.T) {
 	st := tempStore(t)
 	b := bus.New()
 	out := b.Subscribe("t", TargetChanged{}, PutWanted{})
@@ -621,7 +622,7 @@ func TestModelLaptopBootBindsDualOnlyRecordAndDualReturnPutsItBack(t *testing.T)
 		}
 	}
 	if chrome == 0 {
-		t.Fatal("Chrome has no record after boot 1")
+		t.Fatal("Chrome has no record after login session 1")
 	}
 
 	m2 := newModel(b, st)
@@ -642,7 +643,7 @@ func TestModelLaptopBootBindsDualOnlyRecordAndDualReturnPutsItBack(t *testing.T)
 		}
 	}
 	if !bound {
-		t.Fatalf("laptop boot: decisions %+v; want Chrome adopted onto window %d", ds, chrome)
+		t.Fatalf("laptop login session: decisions %+v; want Chrome adopted onto window %d", ds, chrome)
 	}
 	rs, _ = st.Recorded(mustArr(t, st, "D1"), m2.boot())
 	var placed bool
@@ -809,10 +810,11 @@ func withNormal(p *snapshot, wid uint32, title string) *snapshot {
 	return p
 }
 
-// fullscreenBoot runs boot 1 (Nov 7) on st with window 3, "three",
-// fullscreen on D1, then boot 2 (Nov 8) on the same store, publishing after
-// as its first Current. It returns boot 2's bus and subscription.
-func fullscreenBoot(t *testing.T, st *store.Store, after *snapshot) (*bus.Bus, *bus.Subscription) {
+// fullscreenLogin runs login session 1 (Nov 7) on st with window 3,
+// "three", fullscreen on D1, then login session 2 (Nov 8) on the same store,
+// publishing after as its first Current. It returns login session 2's bus
+// and subscription.
+func fullscreenLogin(t *testing.T, st *store.Store, after *snapshot) (*bus.Bus, *bus.Subscription) {
 	t.Helper()
 	b1, out1 := restartModel(t, st, 7)
 	b1.Publish(current(withFullscreen(twoWindows(), 3, "three")))
@@ -901,11 +903,12 @@ func TestModelUserEnteringAndLeavingFullscreenMovesTheTarget(t *testing.T) {
 	}
 }
 
-// A window fullscreen on D1 that comes back fullscreen on D1 after a reboot
-// binds to its record on its title alone and is clean: nothing is put.
+// A window fullscreen on D1 that comes back fullscreen on D1 in a later
+// login session binds to its record on its title alone and is clean: nothing
+// is put.
 func TestModelReappearedFullscreenWindowBindsByTitleAndIsClean(t *testing.T) {
 	st := tempStore(t)
-	_, out := fullscreenBoot(t, st, withFullscreen(twoWindows(), 13, "three"))
+	_, out := fullscreenLogin(t, st, withFullscreen(twoWindows(), 13, "three"))
 	ds, put := decideOf(t, out, 13)
 	if len(ds) != 1 || ds[0].Kind != arrangement.Clean || put != nil {
 		t.Fatalf("window 13: %v, put wanted %v; want clean and no put", kindsOf(ds), put != nil)
@@ -938,9 +941,9 @@ func TestModelFullscreenWindowOffTargetIsPut(t *testing.T) {
 	}
 }
 
-// After a reboot a window whose target is fullscreen on D1 comes back as a
-// normal window: bound by title, it is put, unless D1 shows a fullscreen
-// space, where nothing can be staged: then it is a failed put.
+// In a later login session a window whose target is fullscreen on D1 comes
+// back as a normal window: bound by title, it is put, unless D1 shows a
+// fullscreen space, where nothing can be staged: then it is a failed put.
 func TestModelFullscreenTargetIsPutOntoADisplayShowingAUserSpace(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -955,7 +958,7 @@ func TestModelFullscreenTargetIsPutOntoADisplayShowingAUserSpace(t *testing.T) {
 			after.fsSpace[400] = "D1"
 			after.currentOf["D1"] = c.shown
 			after.current = map[uint64]bool{c.shown: true}
-			_, out := fullscreenBoot(t, tempStore(t), after)
+			_, out := fullscreenLogin(t, tempStore(t), after)
 			ds, put := decideOf(t, out, 13)
 			if len(ds) != 1 || ds[0].Kind != c.want || ds[0].Want != arrangement.FullscreenOn("D1") {
 				t.Fatalf("window 13: %+v, want %v toward fullscreen on D1", ds, c.want)
@@ -974,7 +977,7 @@ func TestModelFullscreenTargetIsPutOntoADisplayShowingAUserSpace(t *testing.T) {
 // target stays fullscreen on D1 and the window stays dirty.
 func TestModelFailedFullscreenPutKeepsTheTarget(t *testing.T) {
 	st := tempStore(t)
-	b, out := fullscreenBoot(t, st, withNormal(twoWindows(), 13, "three"))
+	b, out := fullscreenLogin(t, st, withNormal(twoWindows(), 13, "three"))
 	if _, put := decideOf(t, out, 13); put == nil {
 		t.Fatal("no put wanted for window 13")
 	}
@@ -999,5 +1002,63 @@ func TestModelFailedFullscreenPutKeepsTheTarget(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no record for binding 13")
+	}
+}
+
+// lineWindow is a LINE window wid titled title at f.
+func lineWindow(wid uint32, title string, f layout.Rect) layout.LiveWindow {
+	return layout.LiveWindow{ID: wid, OwnerPID: 40, OwnerName: "LINE", BundleID: "jp.naver.line.mac", Title: title, Frame: f}
+}
+
+// withLine adds w to p on s1 (100).
+func withLine(p *snapshot, w layout.LiveWindow) *snapshot {
+	p.winSpace[w.ID] = 100
+	p.windows = append(p.windows, w)
+	p.all = append(p.all, layout.ListedWindow{ID: w.ID, OwnerName: w.OwnerName, Title: w.Title})
+	return p
+}
+
+// A put attempt belongs to the binding it was tried on. In a later login
+// session LINE's login dialog binds to the record of LINE's main window, is
+// put, and the put fails. The dialog closes and the main window appears
+// under another new id, off its target: it binds to the same record and is
+// put, whatever the dialog's put did.
+func TestModelAWindowNewlyBoundIsPutWhateverAnEarlierBindingTried(t *testing.T) {
+	st := tempStore(t)
+	main := layout.Rect{X: 500, Y: 100, W: 400, H: 600}
+	b1, out1 := restartModel(t, st, 7)
+	b1.Publish(current(withLine(testPicture(), lineWindow(2, "LINE", main))))
+	decisionsOf(t, out1, 2) // adopts window 1 and LINE
+	b1.Close()
+
+	b, out := restartModel(t, st, 8)
+	dialog := withLine(testPicture(), lineWindow(12, "", layout.Rect{X: 300, Y: 300, W: 300, H: 200}))
+	b.Publish(current(dialog))
+	if ds, put := decideOf(t, out, 12); len(ds) == 0 || ds[len(ds)-1].Kind != arrangement.Put || put == nil {
+		t.Fatalf("login dialog 12: %v, put wanted %v; want it bound and put", kindsOf(ds), put != nil)
+	}
+	b.Publish(PutEnded{Stamp: event.Now()}) // the put did not take: Current unchanged
+	if ds, _ := decideOf(t, out, 12); len(ds) != 1 || ds[0].Kind != arrangement.Failed {
+		t.Fatalf("after the dialog's put: %v, want a failed put", kindsOf(ds))
+	}
+
+	after := withLine(testPicture(), lineWindow(22, "LINE", layout.Rect{X: 700, Y: 200, W: 400, H: 600}))
+	b.Publish(current(after)) // the dialog is gone from the window list
+	b.Publish(WindowQuiet{Stamp: event.Now(), Window: 22})
+	ds, put := decideOf(t, out, 22)
+	putOrdered := false
+	for _, d := range ds {
+		if d.Kind == arrangement.Failed {
+			t.Fatalf("window 22: %v, want a put, not a failed put carried over from the dialog's binding", kindsOf(ds))
+		}
+		putOrdered = putOrdered || d.Kind == arrangement.Put
+	}
+	if put != nil {
+		for _, d := range put.Decisions {
+			putOrdered = putOrdered || (d.Seen.Binding == 22 && d.Want.Frame == main)
+		}
+	}
+	if !putOrdered {
+		t.Fatalf("window 22: %v, put wanted %v; want a put to the main window's target", kindsOf(ds), put != nil)
 	}
 }
