@@ -210,7 +210,6 @@ func TestBindCountRuleKeepsOtherText(t *testing.T) {
 }
 
 func TestBindLaterBootBreaksTitleOnlyAndFrameOnlyTies(t *testing.T) {
-	pending(t)
 	// Two dead records from different boots that share only a title, or only
 	// a frame: the one bound in the later boot is the window.
 	later := left(1, "New Tab", "S2", full)
@@ -248,7 +247,6 @@ func TestBindFullscreenOffersNoFrameEvidence(t *testing.T) {
 // loading title matched a stale popup record while the frame named the real
 // window.
 func TestBindFrameBeatsTitle(t *testing.T) {
-	pending(t)
 	st := []Stored{left(165, "edgeplay Mail", "S1", odd), left(371, "Follow The Money - edgeplay Mail", "S1", full)}
 	got := Bind([]Seen{fresh(900, "edgeplay Mail", full)}, st, thisBoot, map[uint32]bool{900: true})
 	if got[900] != 371 {
@@ -259,7 +257,6 @@ func TestBindFrameBeatsTitle(t *testing.T) {
 // Stale twins at one frame (VS Code's old windows) are narrowed to the one
 // bound in the later boot when a renamed window reappears at that frame.
 func TestBindFrameTiesNarrowToTheLaterBoot(t *testing.T) {
-	pending(t)
 	later := left(23, "decisions.md — monitor", "S3", full)
 	later.Boot = thisBoot - 86400
 	earlier := left(21, "Release Notes: 1.145.0 — lube", "S3", full)
@@ -271,7 +268,6 @@ func TestBindFrameTiesNarrowToTheLaterBoot(t *testing.T) {
 }
 
 func TestBindTitleTiesNarrowToTheLaterBoot(t *testing.T) {
-	pending(t)
 	later := left(1, "PocketSmith", "S2", odd)
 	later.Boot = thisBoot - 86400
 	earlier := left(2, "PocketSmith", "S3", rightHalf)
@@ -285,7 +281,6 @@ func TestBindTitleTiesNarrowToTheLaterBoot(t *testing.T) {
 // A lone fresh window of an app with no title or frame evidence (LINE's
 // untitled login window) binds to the app's record bound in the latest boot.
 func TestBindLoneWindowOfAnAppOnAppAlone(t *testing.T) {
-	pending(t)
 	line := func(win int64, title string, f layout.Rect, boot int64) Stored {
 		return Stored{Window: win, Bundle: "jp.naver.line.mac", App: "LINE", Title: title,
 			Placement: Placement{Space: "S5", Frame: f}, Placed: true, Boot: boot, Binding: uint32(win)}
@@ -318,5 +313,19 @@ func TestBindSameBootTwinsStayAmbiguousOnAppAlone(t *testing.T) {
 	st := []Stored{left(1, "a", "S2", full), left(2, "b", "S3", rightHalf)}
 	if got := Bind([]Seen{fresh(900, "new", odd)}, st, thisBoot, map[uint32]bool{900: true}); len(got) != 0 {
 		t.Fatalf("got %v, want nothing: two records of one boot", got)
+	}
+}
+
+// Two same-boot twins on the strongest evidence stay ambiguous, and a record
+// with weaker evidence from a later boot does not step in below them.
+func TestBindAmbiguityAtAStrongerLevelBlocksWeakerOnes(t *testing.T) {
+	twinA := left(1, "PocketSmith", "S2", odd)
+	twinA.Boot = thisBoot - 2*86400
+	twinB := left(2, "PocketSmith", "S3", odd)
+	twinB.Boot = thisBoot - 2*86400
+	other := left(3, "Unrelated", "S4", rightHalf)
+	other.Boot = thisBoot - 86400
+	if got := Bind([]Seen{fresh(900, "PocketSmith", odd)}, []Stored{twinA, twinB, other}, thisBoot, map[uint32]bool{900: true}); len(got) != 0 {
+		t.Fatalf("got %v, want nothing: the twins are ambiguous and the later record is weaker evidence", got)
 	}
 }
