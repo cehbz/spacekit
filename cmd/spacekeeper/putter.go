@@ -36,7 +36,7 @@ func (liveOrders) fullscreen(pid int, wid uint32) error {
 	return skylight.SetWindowFullscreen(pid, wid)
 }
 func (liveOrders) exitFullscreen(pid int, wid uint32) error {
-	return nil // stub: the exit task gives it skylight's AXFullScreen clear
+	return skylight.ClearWindowFullscreen(pid, wid)
 }
 func (liveOrders) switchSpace(display string, right bool) error {
 	return spacekey.StepOn(display, right)

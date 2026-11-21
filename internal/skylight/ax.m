@@ -109,11 +109,11 @@ int sk_window_ax_frame(int pid, uint32_t wid, double *x, double *y, double *w, d
 	return rc;
 }
 
-// Set AXFullScreen on the window with the given CGWindowID. Returns 0 on
+// Set or clear AXFullScreen on the window with the given CGWindowID. Returns 0 on
 // success, 1 if AX is not permitted or the app has no AX windows, 2 if the
 // window is not in its app's AX list (Chrome lists only windows on a shown
 // space), 3 if the app refused.
-int sk_set_window_fullscreen(int pid, uint32_t wid) {
+int sk_set_window_fullscreen(int pid, uint32_t wid, int on) {
 	AXUIElementRef app = AXUIElementCreateApplication((pid_t)pid);
 	if (!app) return 1;
 	CFArrayRef windows = NULL;
@@ -127,7 +127,7 @@ int sk_set_window_fullscreen(int pid, uint32_t wid) {
 		AXUIElementRef win = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
 		CGWindowID got = 0;
 		if (_AXUIElementGetWindow(win, &got) != kAXErrorSuccess || got != wid) continue;
-		rc = AXUIElementSetAttributeValue(win, CFSTR("AXFullScreen"), kCFBooleanTrue) == kAXErrorSuccess ? 0 : 3;
+		rc = AXUIElementSetAttributeValue(win, CFSTR("AXFullScreen"), on ? kCFBooleanTrue : kCFBooleanFalse) == kAXErrorSuccess ? 0 : 3;
 		break;
 	}
 	CFRelease(windows);
