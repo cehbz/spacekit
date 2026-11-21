@@ -12,10 +12,10 @@ import (
 )
 
 var (
-	boot = time.Unix(1790000000, 0)
-	t0   = time.UnixMilli(1790000100000)
-	full = layout.Rect{X: 0, Y: 30, W: 1280, H: 1410}
-	half = layout.Rect{X: 0, Y: 517, W: 735, H: 923}
+	session = time.Unix(1790000000, 0)
+	t0      = time.UnixMilli(1790000100000)
+	full    = layout.Rect{X: 0, Y: 30, W: 1280, H: 1410}
+	half    = layout.Rect{X: 0, Y: 517, W: 735, H: 923}
 )
 
 func open(t *testing.T) *Store {
@@ -62,10 +62,10 @@ func seen(wid uint32, space string, f layout.Rect) arrangement.Seen {
 
 func adoptNew(t *testing.T, s *Store, arr int64, wid uint32, space string, f layout.Rect) arrangement.Recorded {
 	t.Helper()
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(wid, space, f)}}); err != nil {
+	if err := s.Apply(arr, session, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(wid, space, f)}}); err != nil {
 		t.Fatal(err)
 	}
-	rs, err := s.Recorded(arr, boot)
+	rs, err := s.Recorded(arr, session)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestAdoptAgainClosesTheOldVersion(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	r := adoptNew(t, s, arr, 42, "S1", full)
-	err := s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}})
+	err := s.Apply(arr, session, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestAdoptAgainClosesTheOldVersion(t *testing.T) {
 	if n := count(t, s, `SELECT COUNT(*) FROM placement WHERE window_id = ? AND closed_by IS NULL`, r.Window); n != 1 {
 		t.Fatalf("open versions = %d, want 1", n)
 	}
-	rs, _ := s.Recorded(arr, boot)
+	rs, _ := s.Recorded(arr, session)
 	if len(rs) != 1 || rs[0].Space != "S2" || rs[0].Frame != half {
 		t.Fatalf("recorded = %+v", rs)
 	}
@@ -153,11 +153,11 @@ func TestRecordedIsScopedToLoginSessionAndArrangement(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1,D2", "S1")
 	adoptNew(t, s, arr, 42, "S1", full)
-	if rs, _ := s.Recorded(arr, boot.Add(time.Hour)); len(rs) != 0 {
+	if rs, _ := s.Recorded(arr, session.Add(time.Hour)); len(rs) != 0 {
 		t.Fatalf("another login session has no bindings: %+v", rs)
 	}
 	other, _ := s.Arrangement("D2")
-	rs, _ := s.Recorded(other, boot)
+	rs, _ := s.Recorded(other, session)
 	if len(rs) != 1 || rs[0].Placed {
 		t.Fatalf("bound this login session but not placed in the other arrangement: %+v", rs)
 	}
@@ -165,7 +165,7 @@ func TestRecordedIsScopedToLoginSessionAndArrangement(t *testing.T) {
 
 func one(t *testing.T, s *Store, arr int64) arrangement.Recorded {
 	t.Helper()
-	rs, err := s.Recorded(arr, boot)
+	rs, err := s.Recorded(arr, session)
 	if err != nil || len(rs) != 1 {
 		t.Fatalf("recorded = %+v, %v", rs, err)
 	}
@@ -176,13 +176,13 @@ func TestDirtyThenClean(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
+	if err := s.Apply(arr, session, t0, "look", []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := one(t, s, arr); !got.Dirty || got.Progress != arrangement.Untried || got.Frame != full {
 		t.Fatalf("dirty keeps its placement: %+v", got)
 	}
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Clean, Window: r.Window, Seen: seen(42, "S1", full)}}); err != nil {
+	if err := s.Apply(arr, session, t0, "look", []arrangement.Decision{{Kind: arrangement.Clean, Window: r.Window, Seen: seen(42, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := one(t, s, arr); got.Dirty {
@@ -202,7 +202,7 @@ func TestPutRecordsProgress(t *testing.T) {
 		{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S2", half)},
 		{Kind: arrangement.Put, Window: r.Window, Seen: seen(42, "S2", half), Want: want, Move: true, Resize: true},
 	}
-	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
+	if err := s.Apply(arr, session, t0, "look", ds); err != nil {
 		t.Fatal(err)
 	}
 	if got := one(t, s, arr); got.Progress != arrangement.Attempted {
@@ -216,7 +216,7 @@ func TestIdlePutWritesNothing(t *testing.T) {
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	before := count(t, s, `SELECT COUNT(*) FROM change`)
 	idle := arrangement.Decision{Kind: arrangement.Put, Window: r.Window, Seen: seen(42, "S1", half), Want: arrangement.Placement{Space: "S1", Frame: full}}
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{idle}); err != nil {
+	if err := s.Apply(arr, session, t0, "look", []arrangement.Decision{idle}); err != nil {
 		t.Fatal(err)
 	}
 	if after := count(t, s, `SELECT COUNT(*) FROM change`); after != before {
@@ -229,12 +229,12 @@ func TestFailedKeepsTheTarget(t *testing.T) {
 	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	ds := []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)}}
-	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
+	if err := s.Apply(arr, session, t0, "look", ds); err != nil {
 		t.Fatal(err)
 	}
 	failed := arrangement.Decision{Kind: arrangement.Failed, Window: r.Window, Seen: seen(42, "S1", half),
 		Want: arrangement.Placement{Space: "S1", Frame: full}}
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{failed}); err != nil {
+	if err := s.Apply(arr, session, t0, "look", []arrangement.Decision{failed}); err != nil {
 		t.Fatal(err)
 	}
 	got := one(t, s, arr)
@@ -255,7 +255,7 @@ func TestFailedMarksAnAttempt(t *testing.T) {
 		{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)},
 		{Kind: arrangement.Failed, Window: r.Window, Seen: seen(42, "S1", half), Want: arrangement.Placement{Space: "S1", Frame: full}},
 	}
-	if err := s.Apply(arr, boot, t0, "look", failed); err != nil {
+	if err := s.Apply(arr, session, t0, "look", failed); err != nil {
 		t.Fatal(err)
 	}
 	if got := one(t, s, arr); !got.Dirty || got.Progress != arrangement.Attempted {
@@ -271,11 +271,11 @@ func TestAdoptOfADirtyWindowCleansIt(t *testing.T) {
 	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	ds := []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)}}
-	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
+	if err := s.Apply(arr, session, t0, "look", ds); err != nil {
 		t.Fatal(err)
 	}
 	ds = []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}
-	if err := s.Apply(arr, boot, t0, "look", ds); err != nil {
+	if err := s.Apply(arr, session, t0, "look", ds); err != nil {
 		t.Fatal(err)
 	}
 	got := one(t, s, arr)
@@ -296,20 +296,20 @@ func TestOweAllOwesPlacedWindowsOfThisLoginSessionAndResetsProgress(t *testing.T
 		{Kind: arrangement.Dirty, Window: a.Window, Seen: seen(1, "S2", half)},
 		{Kind: arrangement.Put, Window: a.Window, Seen: seen(1, "S2", half), Want: arrangement.Placement{Space: "S1", Frame: full}, Move: true},
 	}
-	if err := s.Apply(arr, boot, t0, "look", moved); err != nil {
+	if err := s.Apply(arr, session, t0, "look", moved); err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.OweAll(arr, boot, t0, "display change", []uint32{1, 2})
+	n, err := s.OweAll(arr, session, t0, "display change", []uint32{1, 2})
 	if err != nil || n != 2 {
 		t.Fatalf("OweAll = %d, %v; want 2", n, err)
 	}
-	rs, _ := s.Recorded(arr, boot)
+	rs, _ := s.Recorded(arr, session)
 	for _, r := range rs {
 		if !r.Dirty || r.Progress != arrangement.Untried {
 			t.Fatalf("every placed window dirty afresh: %+v", r)
 		}
 	}
-	if n, _ := s.OweAll(arr, boot.Add(time.Hour), t0, "display change", []uint32{1, 2}); n != 0 {
+	if n, _ := s.OweAll(arr, session.Add(time.Hour), t0, "display change", []uint32{1, 2}); n != 0 {
 		t.Fatalf("another login session has nothing bound: %d", n)
 	}
 }
@@ -320,21 +320,21 @@ func TestDirtyUntriedListsThisLoginSessionsMarkedWindows(t *testing.T) {
 	adoptNew(t, s, arr, 1, "S1", full)
 	b := adoptNew(t, s, arr, 2, "S1", full)
 	adoptNew(t, s, arr, 3, "S1", full)
-	if _, err := s.OweAll(arr, boot, t0, "owe", []uint32{1}); err != nil {
+	if _, err := s.OweAll(arr, session, t0, "owe", []uint32{1}); err != nil {
 		t.Fatal(err)
 	}
 	tried := []arrangement.Decision{
 		{Kind: arrangement.Dirty, Window: b.Window, Seen: seen(2, "S2", half)},
 		{Kind: arrangement.Put, Window: b.Window, Seen: seen(2, "S2", half), Want: arrangement.Placement{Space: "S1", Frame: full}, Move: true, Resize: true},
 	}
-	if err := s.Apply(arr, boot, t0, "display settled", tried); err != nil {
+	if err := s.Apply(arr, session, t0, "display settled", tried); err != nil {
 		t.Fatal(err)
 	}
-	ids, err := s.DirtyUntried(arr, boot)
+	ids, err := s.DirtyUntried(arr, session)
 	if err != nil || len(ids) != 1 || ids[0] != 1 {
 		t.Fatalf("DirtyUntried = %v, %v; want [1]", ids, err)
 	}
-	if ids, _ := s.DirtyUntried(arr, boot.Add(time.Hour)); len(ids) != 0 {
+	if ids, _ := s.DirtyUntried(arr, session.Add(time.Hour)); len(ids) != 0 {
 		t.Fatalf("another login session has nothing bound: %v", ids)
 	}
 }
@@ -345,7 +345,7 @@ func TestRefreshTitles(t *testing.T) {
 	r := adoptNew(t, s, arr, 42, "S1", full)
 	sn := seen(42, "S1", full)
 	sn.Title = "renamed"
-	if err := s.RefreshTitles(boot, []arrangement.Seen{sn}); err != nil {
+	if err := s.RefreshTitles(session, []arrangement.Seen{sn}); err != nil {
 		t.Fatal(err)
 	}
 	var title string
@@ -406,8 +406,52 @@ func TestOpenDropsTheRunColumnKeepingBindings(t *testing.T) {
 	if n := count(t, s, `SELECT COUNT(*) FROM pragma_table_info('binding') WHERE name = 'run'`); n != 0 {
 		t.Fatalf("binding.run present after migration")
 	}
-	if n := count(t, s, `SELECT COUNT(*) FROM binding WHERE window_id = 16 AND boot = 1790000000 AND wid = 149`); n != 1 {
+	if n := count(t, s, `SELECT COUNT(*) FROM binding WHERE window_id = 16 AND session = 1790000000 AND wid = 149`); n != 1 {
 		t.Fatalf("binding lost in migration")
+	}
+}
+
+// A binding is keyed by its login session: Open renames binding.boot to
+// session on a version-6 database, keeping its rows, and a fresh database
+// ends with the same column.
+func TestOpenRenamesBootToSessionKeepingBindings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v6.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() }) // the setup's Fatalf paths
+	db.SetMaxOpenConns(1)
+	qs := append([]string{schema}, migrations[:6]...)
+	qs = append(qs,
+		`PRAGMA user_version = 6`,
+		`INSERT INTO app(id, bundle, name) VALUES (1, 'net.whatsapp.WhatsApp', 'WhatsApp')`,
+		`INSERT INTO window(id, app_id, title, first_seen) VALUES (16, 1, 'WhatsApp', 0)`,
+		`INSERT INTO binding(window_id, boot, wid) VALUES (16, 1790000000, 149)`)
+	for _, q := range qs {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+	}
+	db.Close()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if n := count(t, s, `SELECT COUNT(*) FROM pragma_table_info('binding') WHERE name = 'boot'`); n != 0 {
+		t.Fatal("binding.boot present after migration")
+	}
+	if n := count(t, s, `SELECT COUNT(*) FROM binding WHERE window_id = 16 AND session = 1790000000 AND wid = 149`); n != 1 {
+		t.Fatal("binding lost in migration")
+	}
+	if win, err := s.WindowByBinding(time.Unix(1790000000, 0), 149); err != nil || win != 16 {
+		t.Fatalf("WindowByBinding = %d, %v; want 16", win, err)
+	}
+
+	fresh := open(t)
+	if n := count(t, fresh, `SELECT COUNT(*) FROM pragma_table_info('binding') WHERE name = 'session'`); n != 1 {
+		t.Fatal("fresh database has no binding.session")
 	}
 }
 
@@ -446,7 +490,7 @@ func TestMigrationDropsDisturbance(t *testing.T) {
 func TestStoredCarriesTheLatestBinding(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S2")
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S2", full)}}); err != nil {
+	if err := s.Apply(arr, session, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S2", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	st, err := s.Stored(arr)
@@ -454,7 +498,7 @@ func TestStoredCarriesTheLatestBinding(t *testing.T) {
 		t.Fatalf("Stored = %+v, %v", st, err)
 	}
 	o := st[0]
-	if o.Title != "autobrr" || o.Bundle != "com.example" || o.Space != "S2" || o.Frame != full || o.Boot != boot.Unix() || o.Binding != 42 {
+	if o.Title != "autobrr" || o.Bundle != "com.example" || o.Space != "S2" || o.Frame != full || o.Session != session.Unix() || o.Binding != 42 {
 		t.Fatalf("stored = %+v", o)
 	}
 }
@@ -462,15 +506,15 @@ func TestStoredCarriesTheLatestBinding(t *testing.T) {
 func TestBindGivesAStoredWindowAFreshIdAndMarksItDirty(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S2", "S5")
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S2", full)}}); err != nil {
+	if err := s.Apply(arr, session, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S2", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := s.Stored(arr)
 	f := seenTitled(900, "autobrr - renamed", "S5", full)
-	if err := s.Bind(arr, boot, t0.Add(time.Minute), "relaunch", []Bound{{Window: st[0].Window, Seen: f}}); err != nil {
+	if err := s.Bind(arr, session, t0.Add(time.Minute), "relaunch", []Bound{{Window: st[0].Window, Seen: f}}); err != nil {
 		t.Fatal(err)
 	}
-	rs, _ := s.Recorded(arr, boot)
+	rs, _ := s.Recorded(arr, session)
 	var got *arrangement.Recorded
 	for i := range rs {
 		if rs[i].Binding == 900 {
@@ -496,10 +540,10 @@ func TestJournalShowsWhatEachChangeDid(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	r := adoptNew(t, s, arr, 42, "S1", full) // change 1: first sighting
-	if err := s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}); err != nil {
+	if err := s.Apply(arr, session, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Apply(arr, boot, t0.Add(2*time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S2", full)}}); err != nil {
+	if err := s.Apply(arr, session, t0.Add(2*time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S2", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	j, err := s.Journal(10)
@@ -533,7 +577,7 @@ func TestUndoRestoresThePriorPlacementAndMarksTheWindowDirty(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	r := adoptNew(t, s, arr, 42, "S1", full)
-	if err := s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}); err != nil {
+	if err := s.Apply(arr, session, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}}); err != nil {
 		t.Fatal(err)
 	}
 	bad := int64(count(t, s, `SELECT MAX(id) FROM change`))
@@ -555,9 +599,9 @@ func TestUndoLeavesWindowsThatChangedAgain(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1", "S2", "S3")
 	r := adoptNew(t, s, arr, 42, "S1", full)
-	s.Apply(arr, boot, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}})
+	s.Apply(arr, session, t0.Add(time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S2", half)}})
 	bad := int64(count(t, s, `SELECT MAX(id) FROM change`))
-	s.Apply(arr, boot, t0.Add(2*time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S3", full)}})
+	s.Apply(arr, session, t0.Add(2*time.Minute), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: r.Window, Seen: seen(42, "S3", full)}})
 	before := count(t, s, `SELECT COUNT(*) FROM change`)
 	reverted, skipped, err := s.Undo(bad, t0.Add(3*time.Minute))
 	if err != nil || reverted != 0 || skipped != 1 {
@@ -595,22 +639,22 @@ func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1", "S2")
 	old := t0.Add(-100 * 24 * time.Hour)
-	oldBoot := boot.Add(-100 * 24 * time.Hour)
+	oldSession := session.Add(-100 * 24 * time.Hour)
 
 	// A window of this login session with one stale version and a current one.
-	if err := s.Apply(arr, boot, old, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(1, "S1", full)}}); err != nil {
+	if err := s.Apply(arr, session, old, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(1, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	live := one(t, s, arr)
-	if err := s.Apply(arr, boot, old.Add(time.Hour), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: live.Window, Seen: seen(1, "S2", half)}}); err != nil {
+	if err := s.Apply(arr, session, old.Add(time.Hour), "look", []arrangement.Decision{{Kind: arrangement.Adopt, Window: live.Window, Seen: seen(1, "S2", half)}}); err != nil {
 		t.Fatal(err)
 	}
 	// A window last bound in a login session long ago.
-	if err := s.Apply(arr, oldBoot, old, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(2, "S1", full)}}); err != nil {
+	if err := s.Apply(arr, oldSession, old, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seen(2, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
 
-	n, err := s.Prune(t0.Add(-90*24*time.Hour), boot)
+	n, err := s.Prune(t0.Add(-90*24*time.Hour), session)
 	if err != nil || n != 1 {
 		t.Fatalf("Prune = %d, %v; want the one closed stale version", n, err)
 	}
@@ -629,7 +673,7 @@ func TestPruneDropsOldHistoryAndKeepsWhatIsCurrent(t *testing.T) {
 	if n := count(t, s, `SELECT COUNT(*) FROM event`); n != 0 {
 		t.Fatalf("events of pruned changes are deleted: %d", n)
 	}
-	if again, _ := s.Prune(t0.Add(-90*24*time.Hour), boot); again != 0 {
+	if again, _ := s.Prune(t0.Add(-90*24*time.Hour), session); again != 0 {
 		t.Fatalf("a second prune finds nothing: %d", again)
 	}
 }
@@ -642,13 +686,13 @@ func TestOweAllOwesOnlyWindowsOnScreenEachOnce(t *testing.T) {
 	arr := arrangementWith(t, s, "D1", "S1")
 	a := adoptNew(t, s, arr, 1, "S1", full)
 	adoptNew(t, s, arr, 2, "S1", full) // closed since: not among the live ids
-	if err := s.Bind(arr, boot, t0, "relaunch", []Bound{{Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {
+	if err := s.Bind(arr, session, t0, "relaunch", []Bound{{Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Clean, Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {
+	if err := s.Apply(arr, session, t0, "look", []arrangement.Decision{{Kind: arrangement.Clean, Window: a.Window, Seen: seen(9, "S1", full)}}); err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.OweAll(arr, boot, t0, "display change", []uint32{9})
+	n, err := s.OweAll(arr, session, t0, "display change", []uint32{9})
 	if err != nil || n != 1 {
 		t.Fatalf("OweAll = %d, %v; want 1", n, err)
 	}
@@ -707,7 +751,7 @@ func TestStoredReturnsWindowsPlacedElsewhereUnplaced(t *testing.T) {
 	s := open(t)
 	air, _ := s.Arrangement("D1")
 	dual := arrangementWith(t, s, "D1,D2", "S9")
-	if err := s.Apply(dual, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S9", full)}}); err != nil {
+	if err := s.Apply(dual, session, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S9", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	st, err := s.Stored(air)
@@ -715,7 +759,7 @@ func TestStoredReturnsWindowsPlacedElsewhereUnplaced(t *testing.T) {
 		t.Fatalf("Stored(air) = %+v, %v; want the dual-only window", st, err)
 	}
 	o := st[0]
-	if o.Placed || o.Space != "" || o.Title != "autobrr" || o.Bundle != "com.example" || o.App != "Example" || o.Boot != boot.Unix() || o.Binding != 42 {
+	if o.Placed || o.Space != "" || o.Title != "autobrr" || o.Bundle != "com.example" || o.App != "Example" || o.Session != session.Unix() || o.Binding != 42 {
 		t.Fatalf("stored = %+v; want unplaced, with title, app and latest binding", o)
 	}
 	st, _ = s.Stored(dual)
@@ -730,18 +774,18 @@ func TestBindToAWindowUnplacedHereIsNotDirty(t *testing.T) {
 	s := open(t)
 	air, _ := s.Arrangement("D1")
 	dual := arrangementWith(t, s, "D1,D2", "S9")
-	if err := s.Apply(dual, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S9", full)}}); err != nil {
+	if err := s.Apply(dual, session, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "autobrr", "S9", full)}}); err != nil {
 		t.Fatal(err)
 	}
 	st, _ := s.Stored(air)
 	if len(st) != 1 {
 		t.Fatalf("Stored(air) = %+v, want the dual-only window", st)
 	}
-	boot2 := boot.Add(24 * time.Hour)
-	if err := s.Bind(air, boot2, t0.Add(24*time.Hour), "startup", []Bound{{Window: st[0].Window, Seen: seenTitled(900, "autobrr", "S1", half)}}); err != nil {
+	session2 := session.Add(24 * time.Hour)
+	if err := s.Bind(air, session2, t0.Add(24*time.Hour), "startup", []Bound{{Window: st[0].Window, Seen: seenTitled(900, "autobrr", "S1", half)}}); err != nil {
 		t.Fatal(err)
 	}
-	rs, _ := s.Recorded(air, boot2)
+	rs, _ := s.Recorded(air, session2)
 	if len(rs) != 1 || rs[0].Window != st[0].Window || rs[0].Placed || rs[0].Dirty {
 		t.Fatalf("Recorded(air) = %+v; want the same window, unplaced, not dirty", rs)
 	}
@@ -766,7 +810,7 @@ func TestAppsAreKeyedByBundleOrName(t *testing.T) {
 	d := seenTitled(4, "d", "S1", half)
 	d.Bundle, d.App = "", "sh"
 	for _, w := range []arrangement.Seen{a, b, c, d} {
-		if err := s.Apply(arr, boot, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: w}}); err != nil {
+		if err := s.Apply(arr, session, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: w}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -882,7 +926,7 @@ func TestHistoryListsAWindowsDecisionsInOrder(t *testing.T) {
 		{"put ended", []arrangement.Decision{{Kind: arrangement.Clean, Window: r.Window, Seen: seen(42, "S1", full)}}},
 	}
 	for i, st := range steps {
-		if err := s.Apply(arr, boot, t0.Add(time.Duration(i+1)*time.Second), st.cause, st.ds); err != nil {
+		if err := s.Apply(arr, session, t0.Add(time.Duration(i+1)*time.Second), st.cause, st.ds); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -918,14 +962,14 @@ func TestWindowRecordCarriesTargetsAndBindings(t *testing.T) {
 	s := open(t)
 	arr := arrangementWith(t, s, "D1", "S1")
 	r := adoptNew(t, s, arr, 42, "S1", full)
-	if err := s.Apply(arr, boot, t0, "display settled", []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
+	if err := s.Apply(arr, session, t0, "display settled", []arrangement.Decision{{Kind: arrangement.Dirty, Window: r.Window, Seen: seen(42, "S1", half)}}); err != nil {
 		t.Fatal(err)
 	}
-	win, err := s.WindowByBinding(boot, 42)
+	win, err := s.WindowByBinding(session, 42)
 	if err != nil || win != r.Window {
 		t.Fatalf("WindowByBinding = %d, %v; want %d", win, err, r.Window)
 	}
-	if none, err := s.WindowByBinding(boot, 43); err != nil || none != 0 {
+	if none, err := s.WindowByBinding(session, 43); err != nil || none != 0 {
 		t.Fatalf("an unbound id yields 0: %d, %v", none, err)
 	}
 	rec, err := s.Window(r.Window)
@@ -940,7 +984,7 @@ func TestWindowRecordCarriesTargetsAndBindings(t *testing.T) {
 		t.Fatalf("target %+v", tg)
 	}
 	bs, err := s.Bindings(r.Window)
-	if err != nil || len(bs) != 1 || bs[0].WID != 42 || !bs[0].Boot.Equal(boot) {
+	if err != nil || len(bs) != 1 || bs[0].WID != 42 || !bs[0].Session.Equal(session) {
 		t.Fatalf("bindings %+v %v", bs, err)
 	}
 }
@@ -955,7 +999,7 @@ func seenAs(wid uint32, p arrangement.Placement) arrangement.Seen {
 // adoptAt records that window win (wid in this login session) is now at p.
 func adoptAt(t *testing.T, s *Store, arr int64, at time.Time, win int64, wid uint32, p arrangement.Placement) {
 	t.Helper()
-	if err := s.Apply(arr, boot, at, "window settled", []arrangement.Decision{{Kind: arrangement.Adopt, Window: win, Seen: seenAs(wid, p)}}); err != nil {
+	if err := s.Apply(arr, session, at, "window settled", []arrangement.Decision{{Kind: arrangement.Adopt, Window: win, Seen: seenAs(wid, p)}}); err != nil {
 		t.Fatalf("recording %+v: %v", p, err)
 	}
 }

@@ -7,7 +7,6 @@ import (
 
 // A login session begins after the boot it runs in, and not later than now.
 func TestLoginTimeIsAfterBootAndNotInTheFuture(t *testing.T) {
-	pending(t)
 	login, boot := loginTime(), bootTime()
 	if !login.After(boot) {
 		t.Fatalf("login session began %v, want after boot %v", login, boot)

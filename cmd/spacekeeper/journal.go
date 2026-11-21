@@ -141,7 +141,7 @@ func oweCmd() error {
 	if err != nil {
 		return err
 	}
-	n, err := st.OweAll(arr, bootTime(), time.Now(), "manual owe", bindings(seenWindows(s)))
+	n, err := st.OweAll(arr, loginTime(), time.Now(), "manual owe", bindings(seenWindows(s)))
 	if err != nil {
 		return err
 	}

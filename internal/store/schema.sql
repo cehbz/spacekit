@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS window (
   first_seen INTEGER NOT NULL
 );
 
--- The window-server id a window has in one boot (boot time, unix seconds).
+-- The window-server id a window has in one login session (its start, unix
+-- seconds). Migration 7 renames the column boot to session.
 CREATE TABLE IF NOT EXISTS binding (
   window_id INTEGER NOT NULL REFERENCES window(id),
   boot      INTEGER NOT NULL,

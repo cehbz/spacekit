@@ -53,6 +53,11 @@ func runAgent(ctx context.Context, b *bus.Bus, st *store.Store, o watchOptions, 
 func watchCmd(o watchOptions) error {
 	log.SetFlags(0)
 	log.SetOutput(newZoneWriter(log.Writer(), "/etc/localtime"))
+	if t, console := login.start(); console {
+		log.Printf("login session began %s (utmpx console)", t.Format("2006-01-02 15:04:05"))
+	} else {
+		log.Printf("login session began %s (boot time, no console entry)", t.Format("2006-01-02 15:04:05"))
+	}
 	st, err := store.Open(filepath.Join(dataDir(), "spacekeeper.db"))
 	if err != nil {
 		return err

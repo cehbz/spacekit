@@ -29,7 +29,7 @@ type model struct {
 	b              *bus.Bus
 	sub            *bus.Subscription
 	st             *store.Store
-	boot           func() time.Time // the boot time; tests substitute
+	session        func() time.Time // the login session's start; tests substitute
 	pic            *snapshot
 	hold           struct{ locked, asleep, poweringOff, display, putting bool }
 	pending        pendingDecide
@@ -53,7 +53,7 @@ type pendingDecide struct {
 
 // newModel subscribes at once.
 func newModel(b *bus.Bus, st *store.Store) *model {
-	return &model{b: b, st: st, boot: bootTime, grace: displayGrace, putGrace: putGrace,
+	return &model{b: b, st: st, session: loginTime, grace: displayGrace, putGrace: putGrace,
 		sub: b.Subscribe("model", CurrentChanged{}, WindowQuiet{}, DisplayQuiet{}, DisplayBurstBegan{}, PutEnded{}, Tick{},
 			event.SessionLocked{}, event.SessionUnlocked{}, event.ScreensSlept{}, event.ScreensWoke{},
 			event.SystemSleeping{}, event.SystemWoke{}, event.PoweringOff{})}
@@ -147,7 +147,7 @@ func (m *model) decideMarked() {
 		log.Printf("decide (tick) failed: %v", err)
 		return
 	}
-	marked, err := m.st.DirtyUntried(arr, m.boot())
+	marked, err := m.st.DirtyUntried(arr, m.session())
 	if err != nil {
 		log.Printf("decide (tick) failed: %v", err)
 		return
@@ -227,7 +227,7 @@ func (m *model) decide(cause string, only []uint32, system bool, also map[uint32
 			}
 		}
 	}
-	boot, now := m.boot(), time.Now()
+	session, now := m.session(), time.Now()
 	fail := func(err error) { log.Printf("decide (%s) failed: %v", cause, err) }
 	arr, err := m.st.Arrangement(displaySet(m.pic.spaces))
 	if err != nil {
@@ -238,14 +238,14 @@ func (m *model) decide(cause string, only []uint32, system bool, also map[uint32
 		fail(err)
 		return
 	}
-	recorded, err := m.st.Recorded(arr, boot)
+	recorded, err := m.st.Recorded(arr, session)
 	if err != nil {
 		fail(err)
 		return
 	}
 	// Binding weighs every unclaimed window, so a rival outside a narrowed
 	// decide still makes the evidence ambiguous.
-	recorded, bound, err := m.rebind(arr, boot, now, cause, recorded, all)
+	recorded, bound, err := m.rebind(arr, session, now, cause, recorded, all)
 	if err != nil {
 		fail(err)
 		return
@@ -280,11 +280,11 @@ func (m *model) decide(cause string, only []uint32, system bool, also map[uint32
 			puts = append(puts, *d)
 		}
 	}
-	if err := m.st.Apply(arr, boot, now, cause, ds); err != nil {
+	if err := m.st.Apply(arr, session, now, cause, ds); err != nil {
 		fail(err)
 		return
 	}
-	if err := m.st.RefreshTitles(boot, seen); err != nil {
+	if err := m.st.RefreshTitles(session, seen); err != nil {
 		log.Printf("decide (%s): titles: %v", cause, err)
 	}
 	if len(ds) > 0 {
@@ -321,12 +321,12 @@ func (m *model) orderable(d arrangement.Decision, resolved map[string]uint64) bo
 	return ok
 }
 
-// rebind binds every seen window no record of this boot claims to the record
-// it recreates, if the evidence is unambiguous. It returns the records and
-// the bindings it made; the caller treats those windows' changes as the
+// rebind binds every seen window no record of this login session claims to the
+// record it recreates, if the evidence is unambiguous. It returns the records
+// and the bindings it made; the caller treats those windows' changes as the
 // system's. A record is a candidate once its id is absent from the whole
 // window list.
-func (m *model) rebind(arr int64, boot, now time.Time, cause string, recorded []arrangement.Recorded, seen []arrangement.Seen) ([]arrangement.Recorded, map[uint32]bool, error) {
+func (m *model) rebind(arr int64, session, now time.Time, cause string, recorded []arrangement.Recorded, seen []arrangement.Seen) ([]arrangement.Recorded, map[uint32]bool, error) {
 	claimed := make(map[uint32]bool, len(recorded))
 	for _, r := range recorded {
 		claimed[r.Binding] = true
@@ -348,7 +348,7 @@ func (m *model) rebind(arr int64, boot, now time.Time, cause string, recorded []
 	for _, l := range m.pic.all {
 		live[l.ID] = true
 	}
-	pairs := arrangement.Bind(fresh, stored, boot.Unix(), live)
+	pairs := arrangement.Bind(fresh, stored, session.Unix(), live)
 	if len(pairs) == 0 {
 		return recorded, nil, nil
 	}
@@ -364,7 +364,7 @@ func (m *model) rebind(arr int64, boot, now time.Time, cause string, recorded []
 			names = append(names, s.App+" | "+t)
 		}
 	}
-	if err := m.st.Bind(arr, boot, now, cause, bs); err != nil {
+	if err := m.st.Bind(arr, session, now, cause, bs); err != nil {
 		return nil, nil, err
 	}
 	log.Printf("%s: bound %d of %d unclaimed window(s) to their records: %s", cause, len(bs), len(fresh), strings.Join(names, "; "))
@@ -372,6 +372,6 @@ func (m *model) rebind(arr int64, boot, now time.Time, cause string, recorded []
 	for wid := range pairs {
 		bound[wid] = true
 	}
-	rs, err := m.st.Recorded(arr, boot)
+	rs, err := m.st.Recorded(arr, session)
 	return rs, bound, err
 }

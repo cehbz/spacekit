@@ -48,7 +48,7 @@ func (p *pruner) run(ctx context.Context) {
 				continue
 			}
 			now := time.Now()
-			if n, err := p.st.Prune(now.Add(-retention), bootTime()); err != nil {
+			if n, err := p.st.Prune(now.Add(-retention), loginTime()); err != nil {
 				log.Printf("prune failed: %v", err)
 			} else if n > 0 {
 				log.Printf("pruned %d placement version(s) older than %d days", n, int(retention.Hours()/24))

@@ -16,14 +16,14 @@ func fresh(wid uint32, title string, f layout.Rect) Seen {
 // left is a stored Chrome window bound earlier in this login session.
 func left(win int64, title string, space string, f layout.Rect) Stored {
 	return Stored{Window: win, Bundle: "com.google.Chrome", App: "Google Chrome", Title: title,
-		Placement: Placement{Space: space, Frame: f}, Placed: true, Boot: thisSession, Binding: uint32(win)}
+		Placement: Placement{Space: space, Frame: f}, Placed: true, Session: thisSession, Binding: uint32(win)}
 }
 
 // elsewhere is a stored Chrome window with a record only in another
 // arrangement: no placement here, last bound in an earlier login session.
 func elsewhere(win int64, title string) Stored {
 	return Stored{Window: win, Bundle: "com.google.Chrome", App: "Google Chrome", Title: title,
-		Boot: thisSession - 86400, Binding: uint32(win)}
+		Session: thisSession - 86400, Binding: uint32(win)}
 }
 
 func TestBindUnplacedCandidateOnTitle(t *testing.T) {
@@ -143,7 +143,7 @@ func TestBindNothingBetweenTwoDeadTwins(t *testing.T) {
 
 func TestBindAcrossLoginSessions(t *testing.T) {
 	prev := left(1, "autobrr", "S2", full)
-	prev.Boot = thisSession - 86400 // an earlier login session; its id says nothing about this one
+	prev.Session = thisSession - 86400 // an earlier login session; its id says nothing about this one
 	never := Stored{Window: 2, Bundle: "com.google.Chrome", App: "Google Chrome", Title: "Review", Placement: Placement{Space: "S3", Frame: rightHalf}}
 	two := []Seen{fresh(900, "autobrr", full), fresh(901, "Review", rightHalf)}
 	got := Bind(two, []Stored{prev, never}, thisSession, map[uint32]bool{900: true, 901: true})
@@ -165,9 +165,9 @@ func TestBindTwinsToTheLaterLoginSession(t *testing.T) {
 	// Twins left by earlier failed binds: same title, same frame. The one
 	// bound more recently is the window.
 	later := left(1, "PocketSmith", "S2", odd)
-	later.Boot = thisSession - 86400
+	later.Session = thisSession - 86400
 	earlier := left(2, "PocketSmith", "S3", odd)
-	earlier.Boot = thisSession - 2*86400
+	earlier.Session = thisSession - 2*86400
 	got := Bind([]Seen{fresh(900, "PocketSmith", odd)}, []Stored{later, earlier}, thisSession, map[uint32]bool{900: true})
 	if len(got) != 1 || got[900] != 1 {
 		t.Fatalf("got %v, want 900->1: the twin bound in the later login session", got)
@@ -213,9 +213,9 @@ func TestBindLaterLoginSessionBreaksTitleOnlyAndFrameOnlyTies(t *testing.T) {
 	// Two dead records from different login sessions that share only a title,
 	// or only a frame: the one bound in the later login session is the window.
 	later := left(1, "New Tab", "S2", full)
-	later.Boot = thisSession - 86400
+	later.Session = thisSession - 86400
 	earlier := left(2, "New Tab", "S3", rightHalf)
-	earlier.Boot = thisSession - 2*86400
+	earlier.Session = thisSession - 2*86400
 	if got := Bind([]Seen{fresh(900, "New Tab", odd)}, []Stored{later, earlier}, thisSession, map[uint32]bool{900: true}); got[900] != 1 {
 		t.Fatalf("title only: got %v, want 900->1, the later login session", got)
 	}
@@ -230,7 +230,7 @@ func TestBindLaterLoginSessionBreaksTitleOnlyAndFrameOnlyTies(t *testing.T) {
 // a fullscreen window on title only.
 func TestBindFullscreenOffersNoFrameEvidence(t *testing.T) {
 	stored := []Stored{{Window: 1, Bundle: "com.google.Chrome", App: "Google Chrome", Title: "autobrr",
-		Placement: FullscreenOn("D1"), Placed: true, Boot: thisSession - 86400, Binding: 1}}
+		Placement: FullscreenOn("D1"), Placed: true, Session: thisSession - 86400, Binding: 1}}
 	renamed := Seen{Binding: 900, PID: 5, Bundle: "com.google.Chrome", App: "Google Chrome", Title: "renamed", Placement: FullscreenOn("D1")}
 	other := fresh(901, "other", odd) // a second fresh window, so the app alone decides nothing
 	if got := Bind([]Seen{renamed, other}, stored, thisSession, map[uint32]bool{900: true, 901: true}); len(got) != 0 {
@@ -259,9 +259,9 @@ func TestBindFrameBeatsTitle(t *testing.T) {
 // frame.
 func TestBindFrameTiesNarrowToTheLaterLoginSession(t *testing.T) {
 	later := left(23, "decisions.md — monitor", "S3", full)
-	later.Boot = thisSession - 86400
+	later.Session = thisSession - 86400
 	earlier := left(21, "Release Notes: 1.145.0 — lube", "S3", full)
-	earlier.Boot = thisSession - 2*86400
+	earlier.Session = thisSession - 2*86400
 	got := Bind([]Seen{fresh(900, "Release Notes: 1.147.0 — monitor", full)}, []Stored{later, earlier}, thisSession, map[uint32]bool{900: true})
 	if got[900] != 23 {
 		t.Fatalf("got %v, want 900->23: the twin bound in the later login session", got)
@@ -270,9 +270,9 @@ func TestBindFrameTiesNarrowToTheLaterLoginSession(t *testing.T) {
 
 func TestBindTitleTiesNarrowToTheLaterLoginSession(t *testing.T) {
 	later := left(1, "PocketSmith", "S2", odd)
-	later.Boot = thisSession - 86400
+	later.Session = thisSession - 86400
 	earlier := left(2, "PocketSmith", "S3", rightHalf)
-	earlier.Boot = thisSession - 2*86400
+	earlier.Session = thisSession - 2*86400
 	got := Bind([]Seen{fresh(900, "PocketSmith", full)}, []Stored{later, earlier}, thisSession, map[uint32]bool{900: true})
 	if got[900] != 1 {
 		t.Fatalf("got %v, want 900->1: the record bound in the later login session", got)
@@ -285,7 +285,7 @@ func TestBindTitleTiesNarrowToTheLaterLoginSession(t *testing.T) {
 func TestBindLoneWindowOfAnAppOnAppAlone(t *testing.T) {
 	line := func(win int64, title string, f layout.Rect, session int64) Stored {
 		return Stored{Window: win, Bundle: "jp.naver.line.mac", App: "LINE", Title: title,
-			Placement: Placement{Space: "S5", Frame: f}, Placed: true, Boot: session, Binding: uint32(win)}
+			Placement: Placement{Space: "S5", Frame: f}, Placed: true, Session: session, Binding: uint32(win)}
 	}
 	login := Seen{Binding: 900, PID: 7, Bundle: "jp.naver.line.mac", App: "LINE", Title: "",
 		Placement: Placement{Space: "S1", Frame: layout.Rect{X: 588, Y: 341, W: 604, H: 421}}}
@@ -324,11 +324,11 @@ func TestBindSameLoginSessionTwinsStayAmbiguousOnAppAlone(t *testing.T) {
 // in below them.
 func TestBindAmbiguityAtAStrongerLevelBlocksWeakerOnes(t *testing.T) {
 	twinA := left(1, "PocketSmith", "S2", odd)
-	twinA.Boot = thisSession - 2*86400
+	twinA.Session = thisSession - 2*86400
 	twinB := left(2, "PocketSmith", "S3", odd)
-	twinB.Boot = thisSession - 2*86400
+	twinB.Session = thisSession - 2*86400
 	other := left(3, "Unrelated", "S4", rightHalf)
-	other.Boot = thisSession - 86400
+	other.Session = thisSession - 86400
 	if got := Bind([]Seen{fresh(900, "PocketSmith", odd)}, []Stored{twinA, twinB, other}, thisSession, map[uint32]bool{900: true}); len(got) != 0 {
 		t.Fatalf("got %v, want nothing: the twins are ambiguous and the later record is weaker evidence", got)
 	}

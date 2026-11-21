@@ -53,7 +53,7 @@ const (
 // Recorded is a window as the store knows it in the current arrangement.
 type Recorded struct {
 	Window  int64  // store identity
-	Binding uint32 // window-server id in this boot
+	Binding uint32 // window-server id in this login session
 	Placed  bool   // has a placement in the current arrangement
 	Placement
 	Dirty    bool

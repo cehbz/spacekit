@@ -144,7 +144,7 @@ func TestModelFailedPutLeavesTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rs, err := st.Recorded(arr, bootTime())
+	rs, err := st.Recorded(arr, loginTime())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +234,7 @@ func window2Target(t *testing.T, st *store.Store, p *snapshot) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rs, err := st.Recorded(arr, bootTime())
+	rs, err := st.Recorded(arr, loginTime())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestModelLoginBindsByEvidenceAndPuts(t *testing.T) {
 	b := bus.New()
 	out := b.Subscribe("t", TargetChanged{}, PutWanted{})
 	m := newModel(b, st)
-	m.boot = func() time.Time { return time.Date(2026, 11, 7, 7, 0, 0, 0, time.UTC) }
+	m.session = func() time.Time { return time.Date(2026, 11, 7, 7, 0, 0, 0, time.UTC) }
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go m.run(ctx)
@@ -395,7 +395,7 @@ func TestModelLoginBindsByEvidenceAndPuts(t *testing.T) {
 	cancel()
 
 	m2 := newModel(b, st)
-	m2.boot = func() time.Time { return time.Date(2026, 11, 8, 7, 0, 0, 0, time.UTC) }
+	m2.session = func() time.Time { return time.Date(2026, 11, 8, 7, 0, 0, 0, time.UTC) }
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	t.Cleanup(cancel2)
 	go m2.run(ctx2)
@@ -497,7 +497,7 @@ func restartModel(t *testing.T, st *store.Store, day int) (*bus.Bus, *bus.Subscr
 	b := bus.New()
 	out := b.Subscribe("t", TargetChanged{}, PutWanted{})
 	m := newModel(b, st)
-	m.boot = func() time.Time { return time.Date(2026, 11, day, 7, 0, 0, 0, time.UTC) }
+	m.session = func() time.Time { return time.Date(2026, 11, day, 7, 0, 0, 0, time.UTC) }
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go m.run(ctx)
@@ -604,7 +604,7 @@ func TestModelLaptopLoginBindsDualOnlyRecordAndDualReturnPutsItBack(t *testing.T
 	b := bus.New()
 	out := b.Subscribe("t", TargetChanged{}, PutWanted{})
 	m := newModel(b, st)
-	m.boot = func() time.Time { return time.Date(2026, 11, 7, 7, 0, 0, 0, time.UTC) }
+	m.session = func() time.Time { return time.Date(2026, 11, 7, 7, 0, 0, 0, time.UTC) }
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	go m.run(ctx)
@@ -612,7 +612,7 @@ func TestModelLaptopLoginBindsDualOnlyRecordAndDualReturnPutsItBack(t *testing.T
 	decisionsOf(t, out, 2) // startup adopts windows 1 and 2
 	cancel()
 	var chrome int64
-	rs, err := st.Recorded(mustArr(t, st, "D1,D2"), m.boot())
+	rs, err := st.Recorded(mustArr(t, st, "D1,D2"), m.session())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -626,7 +626,7 @@ func TestModelLaptopLoginBindsDualOnlyRecordAndDualReturnPutsItBack(t *testing.T
 	}
 
 	m2 := newModel(b, st)
-	m2.boot = func() time.Time { return time.Date(2026, 11, 8, 7, 0, 0, 0, time.UTC) }
+	m2.session = func() time.Time { return time.Date(2026, 11, 8, 7, 0, 0, 0, time.UTC) }
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	t.Cleanup(cancel2)
 	go m2.run(ctx2)
@@ -645,7 +645,7 @@ func TestModelLaptopLoginBindsDualOnlyRecordAndDualReturnPutsItBack(t *testing.T
 	if !bound {
 		t.Fatalf("laptop login session: decisions %+v; want Chrome adopted onto window %d", ds, chrome)
 	}
-	rs, _ = st.Recorded(mustArr(t, st, "D1"), m2.boot())
+	rs, _ = st.Recorded(mustArr(t, st, "D1"), m2.session())
 	var placed bool
 	for _, r := range rs {
 		if r.Binding == 22 {
@@ -714,7 +714,7 @@ func TestModelTickPutsWindowsMarkedByOwe(t *testing.T) {
 	moved := twoWindows()
 	moved.windows[1].Frame.X = 400 // hidden window 2, off target
 	b.Publish(current(moved))
-	if _, err := st.OweAll(mustArr(t, st, displaySet(moved.spaces)), bootTime(), time.Now(), "owe", []uint32{2}); err != nil {
+	if _, err := st.OweAll(mustArr(t, st, displaySet(moved.spaces)), loginTime(), time.Now(), "owe", []uint32{2}); err != nil {
 		t.Fatal(err)
 	}
 	b.Publish(Tick{Stamp: event.Now(), N: 1})
@@ -750,7 +750,7 @@ func TestModelPutOntoAGoneSpaceIsAFailedPut(t *testing.T) {
 	decisionsOf(t, out, 2)
 	gone := oneSpace(layout.Rect{X: 10, Y: 10, W: 200, H: 200})
 	b.Publish(current(gone))
-	if _, err := st.OweAll(mustArr(t, st, displaySet(gone.spaces)), bootTime(), time.Now(), "owe", []uint32{2}); err != nil {
+	if _, err := st.OweAll(mustArr(t, st, displaySet(gone.spaces)), loginTime(), time.Now(), "owe", []uint32{2}); err != nil {
 		t.Fatal(err)
 	}
 	b.Publish(Tick{Stamp: event.Now(), N: 1})
@@ -885,7 +885,7 @@ func TestModelUserEnteringAndLeavingFullscreenMovesTheTarget(t *testing.T) {
 	if d := ds[0]; d.Kind != arrangement.Adopt || d.Seen.Placement != landed {
 		t.Fatalf("leaving fullscreen: %+v, want the target to follow to s1", d)
 	}
-	rs, err := st.Recorded(mustArr(t, st, displaySet(left.spaces)), bootTime())
+	rs, err := st.Recorded(mustArr(t, st, displaySet(left.spaces)), loginTime())
 	if err != nil {
 		t.Fatal(err)
 	}

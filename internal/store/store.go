@@ -101,6 +101,9 @@ var migrations = []string{
 	// 6: a display's fullscreen row in space holds the fullscreen targets on
 	// that display; readers take the form from this column, not from the key.
 	`ALTER TABLE space ADD COLUMN fullscreen INTEGER NOT NULL DEFAULT 0`,
+	// 7: a binding lasts a login session, not a boot: the window server reuses
+	// ids across the logins of one boot. The key is the session's start.
+	`ALTER TABLE binding RENAME COLUMN boot TO session`,
 }
 
 func migrate(db *sql.DB) error {
@@ -176,9 +179,9 @@ func (s *Store) Spaces(arr int64) ([]layout.SavedSpace, error) {
 	return out, rows.Err()
 }
 
-// Recorded returns the windows bound in this boot with their current
-// placement in the arrangement, if any, and whether they are dirty.
-func (s *Store) Recorded(arr int64, boot time.Time) ([]arrangement.Recorded, error) {
+// Recorded returns the windows bound in this login session with their
+// current placement in the arrangement, if any, and whether they are dirty.
+func (s *Store) Recorded(arr int64, session time.Time) ([]arrangement.Recorded, error) {
 	rows, err := s.db.Query(`
 		SELECT w.id, b.wid, p.space, COALESCE(sp.fullscreen, 0), COALESCE(sp.display, ''), p.x, p.y, p.w, p.h, o.progress
 		FROM binding b
@@ -186,8 +189,8 @@ func (s *Store) Recorded(arr int64, boot time.Time) ([]arrangement.Recorded, err
 		LEFT JOIN placement p ON p.window_id = w.id AND p.arrangement_id = ?1 AND p.closed_by IS NULL
 		LEFT JOIN space sp ON sp.arrangement_id = p.arrangement_id AND sp.key = p.space
 		LEFT JOIN owed o ON o.window_id = w.id AND o.arrangement_id = ?1
-		WHERE b.boot = ?2
-		ORDER BY w.id`, arr, boot.Unix())
+		WHERE b.session = ?2
+		ORDER BY w.id`, arr, session.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -218,7 +221,7 @@ func (s *Store) Recorded(arr int64, boot time.Time) ([]arrangement.Recorded, err
 
 // Apply records what a decide decided, in one transaction and under one
 // change. Decisions that alter nothing write nothing.
-func (s *Store) Apply(arr int64, boot, at time.Time, cause string, ds []arrangement.Decision) error {
+func (s *Store) Apply(arr int64, session, at time.Time, cause string, ds []arrangement.Decision) error {
 	if !writes(ds) {
 		return nil
 	}
@@ -233,7 +236,7 @@ func (s *Store) Apply(arr int64, boot, at time.Time, cause string, ds []arrangem
 	}
 	change, _ := res.LastInsertId()
 	for _, d := range ds {
-		if err := apply(tx, change, arr, boot, at, d); err != nil {
+		if err := apply(tx, change, arr, session, at, d); err != nil {
 			return err
 		}
 	}
@@ -252,13 +255,13 @@ func writes(ds []arrangement.Decision) bool {
 	return false
 }
 
-func apply(tx *sql.Tx, change, arr int64, boot, at time.Time, d arrangement.Decision) error {
+func apply(tx *sql.Tx, change, arr int64, session, at time.Time, d arrangement.Decision) error {
 	win := d.Window
 	switch d.Kind {
 	case arrangement.Adopt:
 		if win == 0 {
 			var err error
-			if win, err = newWindow(tx, boot, at, d.Seen); err != nil {
+			if win, err = newWindow(tx, session, at, d.Seen); err != nil {
 				return err
 			}
 		}
@@ -316,7 +319,7 @@ func appID(tx *sql.Tx, bundle, name string) (int64, error) {
 	return res.LastInsertId()
 }
 
-func newWindow(tx *sql.Tx, boot, at time.Time, s arrangement.Seen) (int64, error) {
+func newWindow(tx *sql.Tx, session, at time.Time, s arrangement.Seen) (int64, error) {
 	app, err := appID(tx, s.Bundle, s.App)
 	if err != nil {
 		return 0, err
@@ -326,7 +329,7 @@ func newWindow(tx *sql.Tx, boot, at time.Time, s arrangement.Seen) (int64, error
 		return 0, err
 	}
 	win, _ := res.LastInsertId()
-	_, err = tx.Exec(`INSERT INTO binding(window_id, boot, wid) VALUES (?, ?, ?)`, win, boot.Unix(), s.Binding)
+	_, err = tx.Exec(`INSERT INTO binding(window_id, session, wid) VALUES (?, ?, ?)`, win, session.Unix(), s.Binding)
 	return win, err
 }
 
@@ -374,11 +377,11 @@ func event(tx *sql.Tx, change, win int64, kind string) error {
 	return err
 }
 
-// OweAll marks dirty, with no put progress, every window on screen (its
-// id in this boot is among live) that has a placement in the arrangement. A
-// window that is gone is not marked: nothing could clean it. It returns how
-// many windows are dirty.
-func (s *Store) OweAll(arr int64, boot, at time.Time, cause string, live []uint32) (int, error) {
+// OweAll marks dirty, with no put progress, every window on screen (its id
+// in this login session is among live) that has a placement in the
+// arrangement. A window that is gone is not marked: nothing could clean it.
+// It returns how many windows are dirty.
+func (s *Store) OweAll(arr int64, session, at time.Time, cause string, live []uint32) (int, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
@@ -395,8 +398,8 @@ func (s *Store) OweAll(arr int64, boot, at time.Time, cause string, live []uint3
 			INSERT INTO owed(window_id, arrangement_id, progress, since)
 			SELECT p.window_id, p.arrangement_id, 0, ?1
 			FROM placement p JOIN binding b ON b.window_id = p.window_id
-			WHERE b.boot = ?2 AND b.wid = ?3 AND p.arrangement_id = ?4 AND p.closed_by IS NULL
-			ON CONFLICT(window_id, arrangement_id) DO UPDATE SET progress = 0`, change, boot.Unix(), wid, arr)
+			WHERE b.session = ?2 AND b.wid = ?3 AND p.arrangement_id = ?4 AND p.closed_by IS NULL
+			ON CONFLICT(window_id, arrangement_id) DO UPDATE SET progress = 0`, change, session.Unix(), wid, arr)
 		if err != nil {
 			return 0, err
 		}
@@ -410,13 +413,13 @@ func (s *Store) OweAll(arr int64, boot, at time.Time, cause string, live []uint3
 	return n, tx.Commit()
 }
 
-// DirtyUntried returns the window-server ids, in this boot, of the windows
-// marked dirty in the arrangement that no put has tried yet.
-func (s *Store) DirtyUntried(arr int64, boot time.Time) ([]uint32, error) {
+// DirtyUntried returns the window-server ids, in this login session, of the
+// windows marked dirty in the arrangement that no put has tried yet.
+func (s *Store) DirtyUntried(arr int64, session time.Time) ([]uint32, error) {
 	rows, err := s.db.Query(`
 		SELECT b.wid FROM owed o JOIN binding b ON b.window_id = o.window_id
-		WHERE o.arrangement_id = ? AND o.progress = 0 AND b.boot = ?
-		ORDER BY b.wid`, arr, boot.Unix())
+		WHERE o.arrangement_id = ? AND o.progress = 0 AND b.session = ?
+		ORDER BY b.wid`, arr, session.Unix())
 	if err != nil {
 		return nil, err
 	}
@@ -433,9 +436,9 @@ func (s *Store) DirtyUntried(arr int64, boot time.Time) ([]uint32, error) {
 }
 
 // RefreshTitles records the latest title of each seen window bound in this
-// boot. A title is identity for later matching, not a placement, so this
-// writes no change.
-func (s *Store) RefreshTitles(boot time.Time, seen []arrangement.Seen) error {
+// login session. A title is identity for later matching, not a placement, so
+// this writes no change.
+func (s *Store) RefreshTitles(session time.Time, seen []arrangement.Seen) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -443,8 +446,8 @@ func (s *Store) RefreshTitles(boot time.Time, seen []arrangement.Seen) error {
 	defer tx.Rollback()
 	for _, w := range seen {
 		if _, err := tx.Exec(`UPDATE window SET title = ?1
-			WHERE id = (SELECT window_id FROM binding WHERE boot = ?2 AND wid = ?3) AND title <> ?1`,
-			w.Title, boot.Unix(), w.Binding); err != nil {
+			WHERE id = (SELECT window_id FROM binding WHERE session = ?2 AND wid = ?3) AND title <> ?1`,
+			w.Title, session.Unix(), w.Binding); err != nil {
 			return err
 		}
 	}
@@ -458,7 +461,7 @@ func (s *Store) Stored(arr int64) ([]arrangement.Stored, error) {
 		SELECT w.id, a.bundle, a.name, w.title,
 		       p.space IS NOT NULL, COALESCE(p.space, ''), COALESCE(sp.fullscreen, 0), COALESCE(sp.display, ''),
 		       COALESCE(p.x, 0), COALESCE(p.y, 0), COALESCE(p.w, 0), COALESCE(p.h, 0),
-		       COALESCE(b.boot, 0), COALESCE(b.wid, 0)
+		       COALESCE(b.session, 0), COALESCE(b.wid, 0)
 		FROM window w
 		JOIN app a ON a.id = w.app_id
 		LEFT JOIN placement p ON p.window_id = w.id AND p.arrangement_id = ?1 AND p.closed_by IS NULL
@@ -476,7 +479,7 @@ func (s *Store) Stored(arr int64) ([]arrangement.Stored, error) {
 		var fullscreen bool
 		var f layout.Rect
 		if err := rows.Scan(&o.Window, &o.Bundle, &o.App, &o.Title, &o.Placed, &space, &fullscreen, &display, &f.X, &f.Y, &f.W, &f.H,
-			&o.Boot, &o.Binding); err != nil {
+			&o.Session, &o.Binding); err != nil {
 			return nil, err
 		}
 		o.Placement = readPlacement(space, fullscreen, display, f)
@@ -493,7 +496,7 @@ type Bound struct {
 
 // Bind gives stored windows their fresh ids and marks dirty each with a
 // placement in the arrangement.
-func (s *Store) Bind(arr int64, boot, at time.Time, cause string, bound []Bound) error {
+func (s *Store) Bind(arr int64, session, at time.Time, cause string, bound []Bound) error {
 	if len(bound) == 0 {
 		return nil
 	}
@@ -508,8 +511,8 @@ func (s *Store) Bind(arr int64, boot, at time.Time, cause string, bound []Bound)
 	}
 	change, _ := res.LastInsertId()
 	for _, b := range bound {
-		if _, err := tx.Exec(`INSERT OR REPLACE INTO binding(window_id, boot, wid) VALUES (?, ?, ?)`,
-			b.Window, boot.Unix(), b.Seen.Binding); err != nil {
+		if _, err := tx.Exec(`INSERT OR REPLACE INTO binding(window_id, session, wid) VALUES (?, ?, ?)`,
+			b.Window, session.Unix(), b.Seen.Binding); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`UPDATE window SET title = ? WHERE id = ?`, b.Seen.Title, b.Window); err != nil {
@@ -701,12 +704,12 @@ func (s *Store) Undo(change int64, at time.Time) (reverted, skipped int, err err
 	return reverted, skipped, tx.Commit()
 }
 
-// Prune deletes history older than the cutoff: windows last bound in a boot
-// that began before it and not bound in the current boot, closed placement
-// versions whose closing change predates it, the events of changes that old,
-// and changes nothing refers to any more.
+// Prune deletes history older than the cutoff: windows last bound in a login
+// session that began before it and not bound in the current login session,
+// closed placement versions whose closing change predates it, the events of
+// changes that old, and changes nothing refers to any more.
 // It returns the number of closed placement versions deleted.
-func (s *Store) Prune(cutoff, boot time.Time) (int, error) {
+func (s *Store) Prune(cutoff, session time.Time) (int, error) {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
@@ -714,14 +717,14 @@ func (s *Store) Prune(cutoff, boot time.Time) (int, error) {
 	defer tx.Rollback()
 	ms, sec := cutoff.UnixMilli(), cutoff.Unix()
 	gone := `SELECT w.id FROM window w WHERE w.first_seen < ?1 AND NOT EXISTS
-		(SELECT 1 FROM binding b WHERE b.window_id = w.id AND (b.boot = ?2 OR b.boot >= ?3))`
+		(SELECT 1 FROM binding b WHERE b.window_id = w.id AND (b.session = ?2 OR b.session >= ?3))`
 	for _, q := range []string{
 		`DELETE FROM owed WHERE window_id IN (` + gone + `)`,
 		`DELETE FROM event WHERE window_id IN (` + gone + `)`,
 		`DELETE FROM placement WHERE window_id IN (` + gone + `)`,
 		`DELETE FROM binding WHERE window_id IN (` + gone + `)`,
 	} {
-		if _, err := tx.Exec(q, ms, boot.Unix(), sec); err != nil {
+		if _, err := tx.Exec(q, ms, session.Unix(), sec); err != nil {
 			return 0, err
 		}
 	}
@@ -847,10 +850,10 @@ type WindowRecord struct {
 	Targets            []Target
 }
 
-// Binding is one boot's window-server id for a window.
+// Binding is one login session's window-server id for a window.
 type Binding struct {
-	Boot time.Time
-	WID  uint32
+	Session time.Time
+	WID     uint32
 }
 
 // Step is one decision about a window: its change's time and cause, the
@@ -863,10 +866,10 @@ type Step struct {
 	Opened *arrangement.Placement
 }
 
-// WindowByBinding is the window bound to wid in boot, 0 when none.
-func (s *Store) WindowByBinding(boot time.Time, wid uint32) (int64, error) {
+// WindowByBinding is the window bound to wid in session, 0 when none.
+func (s *Store) WindowByBinding(session time.Time, wid uint32) (int64, error) {
 	var win int64
-	err := s.db.QueryRow(`SELECT window_id FROM binding WHERE boot = ? AND wid = ?`, boot.Unix(), wid).Scan(&win)
+	err := s.db.QueryRow(`SELECT window_id FROM binding WHERE session = ? AND wid = ?`, session.Unix(), wid).Scan(&win)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}
@@ -916,9 +919,10 @@ func (s *Store) Window(win int64) (WindowRecord, error) {
 	return r, rows.Err()
 }
 
-// Bindings lists the boots and window-server ids a window has carried, oldest first.
+// Bindings lists the login sessions and window-server ids a window has
+// carried, oldest first.
 func (s *Store) Bindings(win int64) ([]Binding, error) {
-	rows, err := s.db.Query(`SELECT boot, wid FROM binding WHERE window_id = ? ORDER BY boot, rowid`, win)
+	rows, err := s.db.Query(`SELECT session, wid FROM binding WHERE window_id = ? ORDER BY session, rowid`, win)
 	if err != nil {
 		return nil, err
 	}
@@ -926,11 +930,11 @@ func (s *Store) Bindings(win int64) ([]Binding, error) {
 	var out []Binding
 	for rows.Next() {
 		var b Binding
-		var boot int64
-		if err := rows.Scan(&boot, &b.WID); err != nil {
+		var session int64
+		if err := rows.Scan(&session, &b.WID); err != nil {
 			return nil, err
 		}
-		b.Boot = time.Unix(boot, 0)
+		b.Session = time.Unix(session, 0)
 		out = append(out, b)
 	}
 	return out, rows.Err()

@@ -15,9 +15,9 @@ import (
 
 // inspectWindow prints one window's record, its bindings, and its decisions
 // interleaved with the raw window-server events behind them, newest last.
-// arg is a window-server id of this boot, a word of a live window's app name
-// or title that picks out one window, or a record id with record set.
-// Several matches are listed to choose from. Main thread only.
+// arg is a window-server id of this login session, a word of a live window's
+// app name or title that picks out one window, or a record id with record
+// set. Several matches are listed to choose from. Main thread only.
 func inspectWindow(arg string, record bool, last int) error {
 	id, err := strconv.ParseUint(strings.TrimSpace(arg), 10, 64)
 	if err != nil && record {
@@ -59,11 +59,11 @@ func inspectWindow(arg string, record bool, last int) error {
 	}
 	win := int64(id)
 	if !record {
-		if win, err = st.WindowByBinding(bootTime(), uint32(id)); err != nil {
+		if win, err = st.WindowByBinding(loginTime(), uint32(id)); err != nil {
 			return err
 		}
 		if win == 0 {
-			fmt.Printf("window %d has no record in this boot; a record id works with -record\n", id)
+			fmt.Printf("window %d has no record in this login session; a record id works with -record\n", id)
 			return nil
 		}
 	}
@@ -80,10 +80,10 @@ func inspectWindow(arg string, record bool, last int) error {
 		return err
 	}
 	var wids []uint32
-	boot := bootTime()
+	session := loginTime()
 	for _, b := range bs {
-		fmt.Printf("  bound in boot %s as window %d\n", b.Boot.Format("2006-01-02 15:04:05"), b.WID)
-		if b.Boot.Unix() == boot.Unix() {
+		fmt.Printf("  bound in login session %s as window %d\n", b.Session.Format("2006-01-02 15:04:05"), b.WID)
+		if b.Session.Unix() == session.Unix() {
 			wids = append(wids, b.WID)
 		}
 	}
@@ -130,12 +130,13 @@ func targetLine(t store.Target) string {
 		shortDisplaySet(t.DisplaySet), placementText(t.Placement), t.Since.Format("2006-01-02 15:04:05"), t.Change, state)
 }
 
-// recordTitles is the recorded title of each live window bound in this boot.
+// recordTitles is the recorded title of each live window bound in this login
+// session.
 func recordTitles(st *store.Store, windows []layout.LiveWindow) (map[uint32]string, error) {
-	boot := bootTime()
+	session := loginTime()
 	out := map[uint32]string{}
 	for _, w := range windows {
-		win, err := st.WindowByBinding(boot, w.ID)
+		win, err := st.WindowByBinding(session, w.ID)
 		if err != nil {
 			return nil, err
 		}
