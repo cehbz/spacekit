@@ -437,7 +437,7 @@ func (s *Store) DirtyUntried(arr int64, session time.Time) ([]uint32, error) {
 
 // RefreshTitles records the latest title of each seen window bound in this
 // login session. A title is identity for later matching, not a placement, so
-// this writes no change.
+// this writes no change; an empty title is no identity and leaves the record's.
 func (s *Store) RefreshTitles(session time.Time, seen []arrangement.Seen) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -446,7 +446,7 @@ func (s *Store) RefreshTitles(session time.Time, seen []arrangement.Seen) error 
 	defer tx.Rollback()
 	for _, w := range seen {
 		if _, err := tx.Exec(`UPDATE window SET title = ?1
-			WHERE id = (SELECT window_id FROM binding WHERE session = ?2 AND wid = ?3) AND title <> ?1`,
+			WHERE id = (SELECT window_id FROM binding WHERE session = ?2 AND wid = ?3) AND ?1 <> '' AND title <> ?1`,
 			w.Title, session.Unix(), w.Binding); err != nil {
 			return err
 		}
@@ -515,7 +515,7 @@ func (s *Store) Bind(arr int64, session, at time.Time, cause string, bound []Bou
 			b.Window, session.Unix(), b.Seen.Binding); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`UPDATE window SET title = ? WHERE id = ?`, b.Seen.Title, b.Window); err != nil {
+		if _, err := tx.Exec(`UPDATE window SET title = ?1 WHERE id = ?2 AND ?1 <> ''`, b.Seen.Title, b.Window); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(`INSERT INTO owed(window_id, arrangement_id, progress, since)

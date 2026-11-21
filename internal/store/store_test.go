@@ -1069,3 +1069,38 @@ func TestMigrationGivesSpacesAFullscreenColumn(t *testing.T) {
 		t.Fatalf("space.fullscreen columns = %d, want 1", n)
 	}
 }
+
+// A window that shows no title keeps the title its record has, since an empty
+// title is no identity and the last real one is the evidence for a later bind.
+func TestBindWithAnEmptyTitleKeepsTheRecordsTitle(t *testing.T) {
+	s := open(t)
+	arr := arrangementWith(t, s, "D1", "S2")
+	if err := s.Apply(arr, session, t0, "look", []arrangement.Decision{{Kind: arrangement.Adopt, Seen: seenTitled(42, "LINE", "S2", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	st, _ := s.Stored(arr)
+	if err := s.Bind(arr, session, t0.Add(time.Minute), "relaunch", []Bound{{Window: st[0].Window, Seen: seenTitled(900, "", "S2", full)}}); err != nil {
+		t.Fatal(err)
+	}
+	st2, _ := s.Stored(arr)
+	if st2[0].Binding != 900 || st2[0].Title != "LINE" {
+		t.Fatalf("binding and title after an untitled bind: %+v", st2[0])
+	}
+}
+
+func TestRefreshTitlesKeepsTheTitleOfAWindowNowUntitled(t *testing.T) {
+	s := open(t)
+	arr := arrangementWith(t, s, "D1", "S1")
+	r := adoptNew(t, s, arr, 42, "S1", full)
+	named := seenTitled(42, "LINE", "S1", full)
+	if err := s.RefreshTitles(session, []arrangement.Seen{named}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RefreshTitles(session, []arrangement.Seen{seenTitled(42, "", "S1", full)}); err != nil {
+		t.Fatal(err)
+	}
+	var title string
+	if err := s.db.QueryRow(`SELECT title FROM window WHERE id = ?`, r.Window).Scan(&title); err != nil || title != "LINE" {
+		t.Fatalf("title = %q, %v", title, err)
+	}
+}
