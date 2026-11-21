@@ -303,11 +303,12 @@ func readAll() (*snapshot, error) {
 		}
 		var userSpaces []uint64
 		var fsDisplay string
+		var fsID uint64
 		for _, id := range ids {
 			if _, ok := s.idToKey[id]; ok {
 				userSpaces = append(userSpaces, id)
 			} else if disp, ok := s.fsSpace[id]; ok {
-				fsDisplay = disp
+				fsDisplay, fsID = disp, id
 			}
 		}
 		// Keep windows with a single home: one user desktop, or one
@@ -318,6 +319,7 @@ func readAll() (*snapshot, error) {
 			s.winSpace[w.Number] = userSpaces[0]
 		case len(userSpaces) == 0 && fsDisplay != "":
 			s.fsWindow[w.Number] = fsDisplay
+			s.fsSpaceOf[w.Number] = fsID
 		default:
 			continue
 		}
@@ -411,6 +413,7 @@ func (s *snapshot) clone() *snapshot {
 		currentOf: make(map[string]uint64, len(s.currentOf)),
 		fsSpace:   make(map[uint64]string, len(s.fsSpace)),
 		fsWindow:  make(map[uint32]string, len(s.fsWindow)),
+		fsSpaceOf: make(map[uint32]uint64, len(s.fsSpaceOf)),
 		order:     make(map[string][]uint64, len(s.order)),
 	}
 	for i, d := range s.displays {
@@ -433,6 +436,9 @@ func (s *snapshot) clone() *snapshot {
 	}
 	for k, v := range s.fsWindow {
 		c.fsWindow[k] = v
+	}
+	for k, v := range s.fsSpaceOf {
+		c.fsSpaceOf[k] = v
 	}
 	for k, v := range s.order {
 		c.order[k] = append([]uint64(nil), v...)

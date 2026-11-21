@@ -920,12 +920,9 @@ func TestModelReappearedFullscreenWindowBindsByTitleAndIsClean(t *testing.T) {
 	}
 }
 
-// No put takes a window out of fullscreen: a fullscreen window off its
-// target for a system cause is a failed put, and nothing is ordered.
 // A window that is fullscreen while its target is a space and frame is put:
 // the put takes it out of fullscreen first (user decision 2026-11-21).
 func TestModelFullscreenWindowOffTargetIsPut(t *testing.T) {
-	pending(t)
 	b, out := startModel(t)
 	b.Publish(current(withNormal(twoWindows(), 3, "three")))
 	decisionsOf(t, out, 3)

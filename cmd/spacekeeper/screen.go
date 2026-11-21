@@ -124,20 +124,23 @@ func (s *screen) readOne(wid uint32) {
 	}
 	var user []uint64
 	fsDisplay := ""
+	var fsID uint64
 	for _, id := range spaces {
 		if _, ok := s.pic.idToKey[id]; ok {
 			user = append(user, id)
 		} else if d, ok := s.pic.fsSpace[id]; ok {
-			fsDisplay = d
+			fsDisplay, fsID = d, id
 		}
 	}
 	switch {
 	case len(user) == 1:
 		delete(s.pic.fsWindow, wid)
+		delete(s.pic.fsSpaceOf, wid)
 		s.pic.winSpace[wid] = user[0]
 	case len(user) == 0 && fsDisplay != "":
 		delete(s.pic.winSpace, wid)
 		s.pic.fsWindow[wid] = fsDisplay
+		s.pic.fsSpaceOf[wid] = fsID
 	case len(user) == 0 && isHeld:
 		s.transit(wid)
 		return
@@ -177,6 +180,7 @@ func (s *screen) transit(wid uint32) {
 	}
 	delete(s.pic.winSpace, wid)
 	delete(s.pic.fsWindow, wid)
+	delete(s.pic.fsSpaceOf, wid)
 	w, _ := s.pic.window(wid)
 	s.publish(WindowChanged{Stamp: event.Now(), Window: wid, Frame: w.Frame})
 }
@@ -201,6 +205,7 @@ func (s *screen) remove(wid uint32, listed bool) {
 	}
 	delete(s.pic.winSpace, wid)
 	delete(s.pic.fsWindow, wid)
+	delete(s.pic.fsSpaceOf, wid)
 	for i := range s.pic.windows {
 		if s.pic.windows[i].ID == wid {
 			s.pic.windows = append(s.pic.windows[:i], s.pic.windows[i+1:]...)
@@ -373,9 +378,11 @@ func (s *screen) unlist(cause string, fresh *snapshot) {
 // frame and space) and publishes the change.
 func (s *screen) put(w layout.LiveWindow, space uint64, fresh *snapshot) {
 	delete(s.pic.fsWindow, w.ID)
+	delete(s.pic.fsSpaceOf, w.ID)
 	if d, fs := fresh.fsWindow[w.ID]; fs {
 		delete(s.pic.winSpace, w.ID)
 		s.pic.fsWindow[w.ID] = d
+		s.pic.fsSpaceOf[w.ID] = fresh.fsSpaceOf[w.ID]
 	} else {
 		s.pic.winSpace[w.ID] = space
 	}

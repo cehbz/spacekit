@@ -43,18 +43,21 @@ func (liveOrders) switchSpace(display string, right bool) error {
 }
 
 // target is what a step expects Current to report for one window: the
-// space it should be on, the frame it should have, or the display whose
-// fullscreen space it should be on.
+// space it should be on, the frame it should have, the display whose
+// fullscreen space it should be on, or that it has left fullscreen.
 type target struct {
 	space      uint64
 	frame      *layout.Rect
 	fullscreen string
+	exited     bool // the window has left fullscreen onto a user space
 }
 
 func (t target) confirmedBy(c WindowChanged) bool {
 	switch {
 	case c.Gone:
 		return false
+	case t.exited:
+		return c.Fullscreen == "" && c.Space != 0
 	case t.fullscreen != "":
 		return c.Fullscreen == t.fullscreen
 	case t.frame != nil:
@@ -170,8 +173,9 @@ func moves(groups map[uint64][]uint32) func(o orders, _ *snapshot) wants {
 // space their display shows (Accessibility resizes only shown windows),
 // resize, send windows home. A window on the wrong space whose frame is
 // right only goes home. The windows wanting fullscreen are returned apart:
-// each one's steps are planned from Current when its turn comes.
-func plan(req PutWanted) (steps []step, fullscreens []arrangement.Decision) {
+// each one's steps are planned from Current when its turn comes, as are the
+// windows fullscreen now, which leave fullscreen first (exits).
+func plan(req PutWanted) (steps []step, fullscreens, exits []arrangement.Decision) {
 	resolved := layout.ResolveSpaces(req.Spaces, req.Current.displays)
 	displayOf := make(map[string]string, len(req.Spaces))
 	for _, sp := range req.Spaces {
@@ -181,6 +185,10 @@ func plan(req PutWanted) (steps []step, fullscreens []arrangement.Decision) {
 	stage := make(map[uint64][]uint32)
 	var resize []arrangement.Decision
 	for _, d := range req.Decisions {
+		if d.Seen.Fullscreen != "" {
+			exits = append(exits, d)
+			continue
+		}
 		if d.Want.Fullscreen != "" {
 			fullscreens = append(fullscreens, d)
 			continue
@@ -229,7 +237,7 @@ func plan(req PutWanted) (steps []step, fullscreens []arrangement.Decision) {
 	if len(home) > 0 {
 		steps = append(steps, step{name: "home", issue: moves(home)})
 	}
-	return steps, fullscreens
+	return steps, fullscreens, exits
 }
 
 // fullscreenSteps take one window fullscreen on its target display: staged
@@ -283,34 +291,65 @@ func fullscreenSteps(cur *snapshot, d arrangement.Decision) []step {
 			}
 			return wants{windows: map[uint32]target{wid: {fullscreen: display}}, leaves: map[string]uint64{display: shown}}
 		}},
-		step{name: "return", issue: returnTo(display, shown), repeat: true})
+		step{name: "return", issue: stepTo(display, shown), repeat: true})
 }
 
-// returnTo steps display one space toward shown with Ctrl+Arrow and expects
-// the display to show the next space along its order. Nothing is ordered
-// once the display shows shown; when either space is not in its order the
-// display fails unswitched.
+// exitSteps take a fullscreen window out of fullscreen: its display is
+// stepped to the fullscreen space, since an app lists a fullscreen window
+// for Accessibility only while its space is shown, AXFullScreen is cleared,
+// and the window's attach to a user space and the display's switch away from
+// the fullscreen space confirm it. Both steps are required. The caller steps
+// the display back after the window's target steps, or after a failed show
+// or exit, so the window stays reachable meanwhile; it does not when the
+// display showed the fullscreen space itself, which the exit destroys, or
+// when the put was cancelled. A window whose fullscreen space Current does
+// not know fails without an order.
+func exitSteps(cur *snapshot, d arrangement.Decision) []step {
+	wid, pid := d.Seen.Binding, d.Seen.PID
+	display := cur.fsWindow[wid]
+	fs, known := cur.fsSpaceOf[wid]
+	if !known || indexOf(cur.order[display], fs) < 0 {
+		return []step{{name: "exit", issue: func(orders, *snapshot) wants {
+			return wants{unplaced: []uint32{wid}}
+		}}}
+	}
+	return []step{
+		{name: "show", issue: stepTo(display, fs), repeat: true, required: true},
+		{name: "exit", required: true, issue: func(o orders, _ *snapshot) wants {
+			if err := o.exitFullscreen(pid, wid); err != nil {
+				log.Printf("taking window %d out of fullscreen: %v", wid, err)
+				return wants{unplaced: []uint32{wid}}
+			}
+			return wants{windows: map[uint32]target{wid: {exited: true}}, leaves: map[string]uint64{display: fs}}
+		}},
+	}
+}
+
+// stepTo steps display one space toward to with Ctrl+Arrow and expects the
+// display to show the next space along its order. Nothing is ordered once
+// the display shows to; when either space is not in its order the display
+// fails unswitched.
 // Ctrl+Arrow acts on the display under the pointer, so each step is posted
 // with the pointer on display; the first, posted at the attach, switches,
 // and a window staged onto a display's shown space goes fullscreen there.
-func returnTo(display string, shown uint64) func(o orders, cur *snapshot) wants {
+func stepTo(display string, to uint64) func(o orders, cur *snapshot) wants {
 	return func(o orders, cur *snapshot) wants {
 		at := cur.currentOf[display]
-		if at == shown {
+		if at == to {
 			return wants{}
 		}
 		order := cur.order[display]
-		from, to := indexOf(order, at), indexOf(order, shown)
-		if from < 0 || to < 0 {
-			log.Printf("switching display %.8s toward space %d: space %d or %d not in its order", display, shown, at, shown)
+		from, dest := indexOf(order, at), indexOf(order, to)
+		if from < 0 || dest < 0 {
+			log.Printf("stepping display %.8s toward space %d: space %d or %d not in its order", display, to, at, to)
 			return wants{unswitched: []string{display}}
 		}
-		right, next := to > from, from-1
+		right, next := dest > from, from-1
 		if right {
 			next = from + 1
 		}
 		if err := o.switchSpace(display, right); err != nil {
-			log.Printf("switching display %.8s toward space %d: %v", display, shown, err)
+			log.Printf("stepping display %.8s toward space %d: %v", display, to, err)
 			return wants{unswitched: []string{display}}
 		}
 		return wants{shows: map[string]uint64{display: order[next]}}
@@ -328,10 +367,35 @@ func indexOf(ids []uint64, id uint64) int {
 
 func (p *putter) put(ctx context.Context, req PutWanted) {
 	p.cur = req.Current
-	steps, fullscreens := plan(req)
+	steps, fullscreens, exits := plan(req)
 	p.b.Publish(PutStarted{Stamp: event.Now(), Windows: len(req.Decisions)})
 	var rep PutEnded
 	p.runSteps(ctx, steps, &rep)
+	for _, d := range exits {
+		if rep.Cancelled || (len(rep.Steps) > 0 && p.cancelledBeforeOrder(ctx)) {
+			rep.Cancelled = true
+			break
+		}
+		display := p.cur.fsWindow[d.Seen.Binding]
+		shown := p.cur.currentOf[display]
+		_, user := p.cur.idToKey[shown]
+		// After a failed show or exit the window stays where it is, but the
+		// display is still stepped back off the fullscreen space. A display
+		// that showed the window's fullscreen space has nothing to return to.
+		if p.runSteps(ctx, exitSteps(p.cur, d), &rep) {
+			if d.Want.Fullscreen != "" {
+				p.runSteps(ctx, fullscreenSteps(p.cur, d), &rep)
+			} else {
+				// The window has left fullscreen: plan it as the window it now is.
+				d.Seen.Fullscreen = ""
+				placed, _, _ := plan(PutWanted{Arr: req.Arr, Current: p.cur, Spaces: req.Spaces, Decisions: []arrangement.Decision{d}})
+				p.runSteps(ctx, placed, &rep)
+			}
+		}
+		if user && !rep.Cancelled {
+			p.runSteps(ctx, []step{{name: "return", issue: stepTo(display, shown), repeat: true}}, &rep)
+		}
+	}
 	for _, d := range fullscreens {
 		if rep.Cancelled || (len(rep.Steps) > 0 && p.cancelledBeforeOrder(ctx)) {
 			rep.Cancelled = true
@@ -346,28 +410,37 @@ func (p *putter) put(ctx context.Context, req PutWanted) {
 
 // runSteps issues each step and waits for it, recording it in rep; a
 // repeating step stops at the first wait that does not confirm everything.
-func (p *putter) runSteps(ctx context.Context, steps []step, rep *PutEnded) {
+// It reports whether the sequence completed: every step ran and the last
+// left nothing unconfirmed or unswitched, a repeating step that ends by
+// ordering nothing counting as complete. A sequence stopped at a required
+// step or cancelled is not complete.
+func (p *putter) runSteps(ctx context.Context, steps []step, rep *PutEnded) bool {
+	complete := true
 	for _, s := range steps {
 		for {
 			if len(rep.Steps) > 0 && p.cancelledBeforeOrder(ctx) {
 				rep.Cancelled = true
-				return
+				return false
 			}
 			var want wants
 			p.onMain(func() { want = s.issue(p.o, p.cur) })
 			if s.repeat && want.empty() {
+				complete = true
 				break
 			}
 			res := p.await(ctx, s.name, want, rep)
 			rep.Steps = append(rep.Steps, res)
-			if rep.Cancelled || (s.required && len(res.Unconfirmed)+len(res.Unswitched) > 0) {
-				return
+			failed := len(res.Unconfirmed)+len(res.Unswitched) > 0
+			complete = !failed
+			if rep.Cancelled || (s.required && failed) {
+				return false
 			}
-			if !s.repeat || res.Confirmed == 0 || len(res.Unconfirmed)+len(res.Unswitched) > 0 {
+			if !s.repeat || res.Confirmed == 0 || failed {
 				break
 			}
 		}
 	}
+	return complete
 }
 
 // await waits until the screen's events confirm everything the step wants,

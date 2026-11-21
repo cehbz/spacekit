@@ -680,7 +680,6 @@ func showsOn(b *bus.Bus, p *snapshot, d string) {
 // window's attach to a user space, then stages, frames and fullscreens the
 // window on D2, steps D2 back, and last steps D1 back to 100.
 func TestPutExitsFullscreenBeforeAFullscreenTargetOnAnotherDisplay(t *testing.T) {
-	pending(t)
 	b, o, out, cancel := startPutter(t, time.Second)
 	defer cancel()
 	p := twoDisplays(2)
@@ -741,7 +740,6 @@ func TestPutExitsFullscreenBeforeAFullscreenTargetOnAnotherDisplay(t *testing.T)
 // D1 to the fullscreen space, clears AXFullScreen, resizes the window where
 // it lands (s2, which D1 then shows) and steps D1 back to 100.
 func TestPutExitsFullscreenForAPlacementTarget(t *testing.T) {
-	pending(t)
 	b, o, out, cancel := startPutter(t, time.Second)
 	defer cancel()
 	p := twoDisplays(2)
@@ -771,6 +769,68 @@ func TestPutExitsFullscreenForAPlacementTarget(t *testing.T) {
 	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
 	if got := stepNames(rep); got != "show show exit resize return" || rep.Cancelled {
 		t.Fatalf("steps %q, cancelled %v; want show show exit resize return", got, rep.Cancelled)
+	}
+	noOrder(t, o, 50*time.Millisecond)
+}
+
+// When the exit never confirms (the app ignores AXFullScreen), the window
+// stays fullscreen, the put reports the exit unconfirmed, and the display is
+// still stepped back to the space it showed.
+func TestPutStepsTheDisplayBackAfterAFailedExit(t *testing.T) {
+	b, o, out, cancel := startPutter(t, 300*time.Millisecond)
+	defer cancel()
+	p := twoDisplays(2)
+	b.Publish(PutWanted{Stamp: event.Now(), Arr: 1, Current: p, Spaces: p.spaces, Decisions: []arrangement.Decision{{
+		Kind: arrangement.Put, Window: 2,
+		Seen: arrangement.Seen{Binding: 2, PID: 11, App: "B", Title: "two", Placement: arrangement.FullscreenOn("D1")},
+		Want: arrangement.FullscreenOn("D2"), Move: true}}})
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "right")
+	showsOn(b, showing(twoDisplays(2), "D1", 200), "D1")
+	order(t, o, "right")
+	showsOn(b, showing(twoDisplays(2), "D1", 400), "D1")
+	order(t, o, "exit")
+	// no attach to a user space: the exit times out
+	order(t, o, "left") // D1 400 -> 200
+	showsOn(b, showing(twoDisplays(2), "D1", 200), "D1")
+	order(t, o, "left") // D1 200 -> 100
+	showsOn(b, showing(twoDisplays(2), "D1", 100), "D1")
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	if got := stepNames(rep); got != "show show exit return return" {
+		t.Fatalf("steps %q, want show show exit return return", got)
+	}
+	if ex := rep.Steps[2]; ex.Name != "exit" || !reflect.DeepEqual(ex.Unconfirmed, []uint32{2}) {
+		t.Fatalf("exit step %+v, want window 2 unconfirmed", ex)
+	}
+	noOrder(t, o, 50*time.Millisecond)
+}
+
+// The display shows the window's own fullscreen space when the put starts:
+// nothing to show, the exit runs, and there is no space to return to, since
+// the exit destroyed the one it showed.
+func TestPutExitDoesNotReturnToTheDestroyedFullscreenSpace(t *testing.T) {
+	b, o, out, cancel := startPutter(t, time.Second)
+	defer cancel()
+	p := showing(twoDisplays(2), "D1", 400)
+	land := layout.Rect{X: 10, Y: 10, W: 200, H: 200}
+	want := layout.Rect{X: 300, Y: 200, W: 900, H: 700}
+	b.Publish(PutWanted{Stamp: event.Now(), Arr: 1, Current: p, Spaces: p.spaces, Decisions: []arrangement.Decision{{
+		Kind: arrangement.Put, Window: 2,
+		Seen: arrangement.Seen{Binding: 2, PID: 11, App: "B", Title: "two", Placement: arrangement.FullscreenOn("D1")},
+		Want: arrangement.Placement{Space: "s2", Frame: want}, Move: true, Resize: true}}})
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "exit")
+	after := exited(showing(twoDisplays(2), "D1", 200), 2, 200, land)
+	delete(after.fsSpace, 400)
+	after.order["D1"] = []uint64{100, 200}
+	b.Publish(current(after))
+	b.Publish(changed(2, 200, land))
+	b.Publish(SpaceShown{Stamp: event.Now(), Display: "D1", Space: 200})
+	order(t, o, "frame")
+	b.Publish(changed(2, 200, want))
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	if got := stepNames(rep); got != "exit resize" || rep.Cancelled {
+		t.Fatalf("steps %q, cancelled %v; want exit resize", got, rep.Cancelled)
 	}
 	noOrder(t, o, 50*time.Millisecond)
 }
