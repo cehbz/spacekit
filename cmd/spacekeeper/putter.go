@@ -20,6 +20,7 @@ type orders interface {
 	move(wids []uint32, space uint64) error
 	setFrame(pid int, wid uint32, f layout.Rect) error
 	fullscreen(pid int, wid uint32) error
+	exitFullscreen(pid int, wid uint32) error
 	switchSpace(display string, right bool) error
 }
 
@@ -33,6 +34,9 @@ func (liveOrders) setFrame(pid int, wid uint32, f layout.Rect) error {
 }
 func (liveOrders) fullscreen(pid int, wid uint32) error {
 	return skylight.SetWindowFullscreen(pid, wid)
+}
+func (liveOrders) exitFullscreen(pid int, wid uint32) error {
+	return nil // stub: the exit task gives it skylight's AXFullScreen clear
 }
 func (liveOrders) switchSpace(display string, right bool) error {
 	return spacekey.StepOn(display, right)

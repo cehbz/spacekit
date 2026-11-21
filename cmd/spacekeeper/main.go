@@ -166,6 +166,8 @@ type snapshot struct {
 	// fsWindow maps a window living in one to that display UUID.
 	fsSpace  map[uint64]string
 	fsWindow map[uint32]string
+	// fsSpaceOf maps a fullscreen window to the fullscreen space it lives in.
+	fsSpaceOf map[uint32]uint64
 	// order maps a display UUID to all its spaces, fullscreen ones included,
 	// in Mission Control order: the order Ctrl+Arrow steps through.
 	order map[string][]uint64
@@ -269,6 +271,7 @@ func readAll() (*snapshot, error) {
 		currentOf: make(map[string]uint64),
 		fsSpace:   make(map[uint64]string),
 		fsWindow:  make(map[uint32]string),
+		fsSpaceOf: make(map[uint32]uint64),
 	}
 	s.setSpaces(displays)
 	s.fillVisible(liveVisibleFrame)

@@ -795,6 +795,7 @@ var tidalFrame = layout.Rect{X: 100, Y: 283, W: 1470, H: 923}
 func withFullscreen(p *snapshot, wid uint32, title string) *snapshot {
 	p.fsSpace[300] = "D1"
 	p.fsWindow[wid] = "D1"
+	p.fsSpaceOf[wid] = 300
 	p.windows = append(p.windows, layout.LiveWindow{ID: wid, OwnerPID: 12, OwnerName: "T", BundleID: "t.app", Title: title, Frame: tidalFrame})
 	p.all = append(p.all, layout.ListedWindow{ID: wid, OwnerName: "T", Title: title})
 	return p
@@ -921,7 +922,10 @@ func TestModelReappearedFullscreenWindowBindsByTitleAndIsClean(t *testing.T) {
 
 // No put takes a window out of fullscreen: a fullscreen window off its
 // target for a system cause is a failed put, and nothing is ordered.
-func TestModelFullscreenWindowOffTargetIsAFailedPut(t *testing.T) {
+// A window that is fullscreen while its target is a space and frame is put:
+// the put takes it out of fullscreen first (user decision 2026-11-21).
+func TestModelFullscreenWindowOffTargetIsPut(t *testing.T) {
+	pending(t)
 	b, out := startModel(t)
 	b.Publish(current(withNormal(twoWindows(), 3, "three")))
 	decisionsOf(t, out, 3)
@@ -929,8 +933,11 @@ func TestModelFullscreenWindowOffTargetIsAFailedPut(t *testing.T) {
 	b.Publish(current(withFullscreen(twoWindows(), 3, "three")))
 	b.Publish(DisplayQuiet{Stamp: event.Now()})
 	ds, put := decideOf(t, out, 3)
-	if ks := kindsOf(ds); len(ks) != 2 || ks[0] != arrangement.Dirty || ks[1] != arrangement.Failed || put != nil {
-		t.Fatalf("window 3: %v, put wanted %v; want dirty, failed and no put", ks, put != nil)
+	if ks := kindsOf(ds); len(ks) != 2 || ks[0] != arrangement.Dirty || ks[1] != arrangement.Put || put == nil {
+		t.Fatalf("window 3: %v, put wanted %v; want dirty, put and a put wanted", ks, put != nil)
+	}
+	if d := put.Decisions[0]; len(put.Decisions) != 1 || !d.Move || d.Seen.Fullscreen != "D1" {
+		t.Fatalf("put wanted %+v, want the fullscreen window 3 moved", put.Decisions)
 	}
 }
 

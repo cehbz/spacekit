@@ -34,6 +34,10 @@ func (f *fakeOrders) setFrame(pid int, wid uint32, fr layout.Rect) error {
 	return f.frameErr
 }
 func (f *fakeOrders) fullscreen(pid int, wid uint32) error { f.calls <- "fullscreen"; return nil }
+func (f *fakeOrders) exitFullscreen(pid int, wid uint32) error {
+	f.calls <- "exit"
+	return nil
+}
 func (f *fakeOrders) switchSpace(display string, right bool) error {
 	f.mu.Lock()
 	f.switchedOn = append(f.switchedOn, display)
@@ -622,6 +626,151 @@ func TestPutNoReturnWhenTheDisplayDidNotMove(t *testing.T) {
 	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
 	if got := stepNames(rep); got != "fullscreen" || len(rep.Steps[0].Unconfirmed) != 1 || rep.Steps[0].Unconfirmed[0] != 2 {
 		t.Fatalf("report %+v (steps %q), want window 2 unconfirmed and no return", rep, got)
+	}
+	noOrder(t, o, 50*time.Millisecond)
+}
+
+// twoDisplays is twoWindows with window fsWin fullscreen on D1's fullscreen
+// space 400 (D1: s1 100 shown, s2 200, then 400) and a second display D2
+// showing s3 (300). Both displays have visible frames.
+func twoDisplays(fsWin uint32) *snapshot {
+	p := twoWindows()
+	p.idToKey[300] = "s3"
+	p.spaces = append(p.spaces, layout.SavedSpace{UUID: "s3", DisplayUUID: "D2"})
+	p.displays[0].Visible = layout.Rect{X: 0, Y: 30, W: 2560, H: 1410}
+	p.displays = append(p.displays, layout.CurrentDisplay{UUID: "D2", Spaces: []layout.CurrentSpace{{ID: 300, UUID: "s3"}}, Visible: layout.Rect{X: -1470, Y: 283, W: 1470, H: 923}})
+	p.order = map[string][]uint64{"D1": {100, 200, 400}, "D2": {300}}
+	p.fsSpace[400] = "D1"
+	p.current = map[uint64]bool{100: true, 300: true}
+	p.currentOf = map[string]uint64{"D1": 100, "D2": 300}
+	delete(p.winSpace, fsWin)
+	p.fsWindow[fsWin] = "D1"
+	p.fsSpaceOf[fsWin] = 400
+	return p
+}
+
+// showing returns p with display d showing space sp.
+func showing(p *snapshot, d string, sp uint64) *snapshot {
+	delete(p.current, p.currentOf[d])
+	p.currentOf[d] = sp
+	p.current[sp] = true
+	return p
+}
+
+// exited returns p with window wid out of fullscreen on space sp at frame f.
+func exited(p *snapshot, wid uint32, sp uint64, f layout.Rect) *snapshot {
+	delete(p.fsWindow, wid)
+	delete(p.fsSpaceOf, wid)
+	p.winSpace[wid] = sp
+	for i := range p.windows {
+		if p.windows[i].ID == wid {
+			p.windows[i].Frame = f
+		}
+	}
+	return p
+}
+
+func showsOn(b *bus.Bus, p *snapshot, d string) {
+	b.Publish(current(p))
+	b.Publish(SpaceShown{Stamp: event.Now(), Display: d, Space: p.currentOf[d]})
+}
+
+// Window 2 is fullscreen on D1 (space 400, not shown) and belongs fullscreen
+// on D2. The put steps D1 to 400, clears AXFullScreen, confirmed by the
+// window's attach to a user space, then stages, frames and fullscreens the
+// window on D2, steps D2 back, and last steps D1 back to 100.
+func TestPutExitsFullscreenBeforeAFullscreenTargetOnAnotherDisplay(t *testing.T) {
+	pending(t)
+	b, o, out, cancel := startPutter(t, time.Second)
+	defer cancel()
+	p := twoDisplays(2)
+	land := layout.Rect{X: 10, Y: 10, W: 200, H: 200}
+	visD2 := layout.Rect{X: -1470, Y: 283, W: 1470, H: 923}
+	b.Publish(PutWanted{Stamp: event.Now(), Arr: 1, Current: p, Spaces: p.spaces, Decisions: []arrangement.Decision{{
+		Kind: arrangement.Put, Window: 2,
+		Seen: arrangement.Seen{Binding: 2, PID: 11, App: "B", Title: "two", Placement: arrangement.FullscreenOn("D1")},
+		Want: arrangement.FullscreenOn("D2"), Move: true}}})
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "right") // D1 100 -> 200
+	showsOn(b, showing(twoDisplays(2), "D1", 200), "D1")
+	order(t, o, "right") // D1 200 -> 400
+	showsOn(b, showing(twoDisplays(2), "D1", 400), "D1")
+	order(t, o, "exit")
+	noOrder(t, o, 100*time.Millisecond) // waits for the window to land on a user space
+	after := exited(showing(twoDisplays(2), "D1", 200), 2, 200, land)
+	b.Publish(current(after))
+	b.Publish(changed(2, 200, land))
+	b.Publish(SpaceShown{Stamp: event.Now(), Display: "D1", Space: 200})
+	order(t, o, "move") // stage to D2's shown space 300
+	b.Publish(changed(2, 300, land))
+	order(t, o, "frame")
+	if got, ok := o.lastFrame(); !ok || got != visD2 {
+		t.Fatalf("frame ordered %v, %v; want D2's visible frame %v", got, ok, visD2)
+	}
+	b.Publish(changed(2, 300, visD2))
+	order(t, o, "fullscreen")
+	fs := exited(twoDisplays(2), 2, 300, visD2)
+	fs.fsSpace[500] = "D2"
+	fs.order["D2"] = []uint64{300, 500}
+	delete(fs.winSpace, 2)
+	fs.fsWindow[2] = "D2"
+	fs.fsSpaceOf[2] = 500
+	fs = showing(fs, "D1", 200)
+	showsOn(b, showing(fs, "D2", 500), "D2")
+	b.Publish(WindowChanged{Stamp: event.Now(), Window: 2, Fullscreen: "D2"})
+	order(t, o, "left") // D2 500 -> 300
+	showsOn(b, showing(fs, "D2", 300), "D2")
+	order(t, o, "left") // D1 200 -> 100, last
+	showsOn(b, showing(fs, "D1", 100), "D1")
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	if got := stepNames(rep); got != "show show exit stage frame fullscreen return return" || rep.Cancelled {
+		t.Fatalf("steps %q, cancelled %v; want show show exit stage frame fullscreen return return", got, rep.Cancelled)
+	}
+	for _, s := range rep.Steps {
+		if s.Confirmed == 0 || len(s.Unconfirmed)+len(s.Unswitched) > 0 {
+			t.Fatalf("step %+v, want it confirmed", s)
+		}
+	}
+	if got, want := o.switchDisplays(), []string{"D1", "D1", "D2", "D1"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("switches ordered on %q, want %q", got, want)
+	}
+	noOrder(t, o, 50*time.Millisecond)
+}
+
+// Window 2 is fullscreen on D1 and belongs on s2 at a frame: the put steps
+// D1 to the fullscreen space, clears AXFullScreen, resizes the window where
+// it lands (s2, which D1 then shows) and steps D1 back to 100.
+func TestPutExitsFullscreenForAPlacementTarget(t *testing.T) {
+	pending(t)
+	b, o, out, cancel := startPutter(t, time.Second)
+	defer cancel()
+	p := twoDisplays(2)
+	land := layout.Rect{X: 10, Y: 10, W: 200, H: 200}
+	want := layout.Rect{X: 300, Y: 200, W: 900, H: 700}
+	b.Publish(PutWanted{Stamp: event.Now(), Arr: 1, Current: p, Spaces: p.spaces, Decisions: []arrangement.Decision{{
+		Kind: arrangement.Put, Window: 2,
+		Seen: arrangement.Seen{Binding: 2, PID: 11, App: "B", Title: "two", Placement: arrangement.FullscreenOn("D1")},
+		Want: arrangement.Placement{Space: "s2", Frame: want}, Move: true, Resize: true}}})
+	expectEvent(t, out, PutStarted{}, time.Second)
+	order(t, o, "right")
+	showsOn(b, showing(twoDisplays(2), "D1", 200), "D1")
+	order(t, o, "right")
+	showsOn(b, showing(twoDisplays(2), "D1", 400), "D1")
+	order(t, o, "exit")
+	after := exited(showing(twoDisplays(2), "D1", 200), 2, 200, land)
+	b.Publish(current(after))
+	b.Publish(changed(2, 200, land))
+	b.Publish(SpaceShown{Stamp: event.Now(), Display: "D1", Space: 200})
+	order(t, o, "frame") // the resize, on the shown space the window landed on
+	if got, ok := o.lastFrame(); !ok || got != want {
+		t.Fatalf("frame ordered %v, %v; want the target frame %v", got, ok, want)
+	}
+	b.Publish(changed(2, 200, want))
+	order(t, o, "left") // D1 200 -> 100
+	showsOn(b, exited(twoDisplays(2), 2, 200, want), "D1")
+	rep := expectEvent(t, out, PutEnded{}, time.Second).(PutEnded)
+	if got := stepNames(rep); got != "show show exit resize return" || rep.Cancelled {
+		t.Fatalf("steps %q, cancelled %v; want show show exit resize return", got, rep.Cancelled)
 	}
 	noOrder(t, o, 50*time.Millisecond)
 }

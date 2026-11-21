@@ -72,7 +72,7 @@ func testPicture() *snapshot {
 	return &snapshot{
 		winSpace: map[uint32]uint64{1: 100}, idToKey: map[uint64]string{100: "s1", 200: "s2"},
 		current: map[uint64]bool{100: true}, currentOf: map[string]uint64{"D1": 100},
-		fsSpace: map[uint64]string{}, fsWindow: map[uint32]string{},
+		fsSpace: map[uint64]string{}, fsWindow: map[uint32]string{}, fsSpaceOf: map[uint32]uint64{},
 		spaces:   []layout.SavedSpace{{UUID: "s1", DisplayUUID: "D1"}, {UUID: "s2", DisplayUUID: "D1", Index: 1}},
 		displays: []layout.CurrentDisplay{{UUID: "D1", Spaces: []layout.CurrentSpace{{ID: 100, UUID: "s1"}, {ID: 200, UUID: "s2"}}}},
 		windows:  []layout.LiveWindow{{ID: 1, OwnerPID: 10, OwnerName: "A", Title: "one", Frame: layout.Rect{X: 0, Y: 0, W: 100, H: 100}}},
